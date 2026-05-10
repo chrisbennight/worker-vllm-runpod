@@ -1,6 +1,6 @@
 {
-  "title": "vLLM",
-  "description": "Deploy OpenAI-Compatible Blazing-Fast LLM Endpoints powered by vLLM",
+  "title": "worker-vllm-runpod (chrisbennight fork)",
+  "description": "OpenAI-compatible vLLM serverless worker — Blackwell-ready (CUDA 12.8 + 13.0), with embeddings/rerank/classify endpoints alongside chat/completion.",
   "type": "serverless",
   "category": "language",
   "iconUrl": "https://registry.npmmirror.com/@lobehub/icons-static-png/latest/files/dark/vllm-color.png",
@@ -9,12 +9,47 @@
     "containerDiskInGb": 150,
     "gpuIds": "ADA_80_PRO,AMPERE_80",
     "gpuCount": 1,
-    "allowedCudaVersions": ["12.9", "12.8"],
+    "allowedCudaVersions": ["13.0", "12.9", "12.8"],
     "presets": [
       {
         "name": "deepseek-ai/deepseek-r1-distill-llama-8b",
         "defaults": {
           "MODEL_NAME": "deepseek-ai/deepseek-r1-distill-llama-8b"
+        }
+      },
+      {
+        "name": "Qwen/Qwen3-VL-7B-Instruct (image-only)",
+        "defaults": {
+          "MODEL_NAME": "Qwen/Qwen3-VL-7B-Instruct",
+          "TRUST_REMOTE_CODE": "true",
+          "LIMIT_MM_PER_PROMPT": "image=4,video=0",
+          "MAX_MODEL_LEN": "32768",
+          "GPU_MEMORY_UTILIZATION": "0.9"
+        }
+      },
+      {
+        "name": "Qwen/Qwen3-VL-30B-A3B-Instruct (image-only)",
+        "defaults": {
+          "MODEL_NAME": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+          "TRUST_REMOTE_CODE": "true",
+          "LIMIT_MM_PER_PROMPT": "image=4,video=0",
+          "MAX_MODEL_LEN": "32768",
+          "GPU_MEMORY_UTILIZATION": "0.9",
+          "ENABLE_EXPERT_PARALLEL": "true"
+        }
+      },
+      {
+        "name": "BAAI/bge-large-en-v1.5 (embeddings)",
+        "defaults": {
+          "MODEL_NAME": "BAAI/bge-large-en-v1.5",
+          "MODEL_TASK": "embed"
+        }
+      },
+      {
+        "name": "BAAI/bge-reranker-v2-m3 (rerank)",
+        "defaults": {
+          "MODEL_NAME": "BAAI/bge-reranker-v2-m3",
+          "MODEL_TASK": "score"
         }
       }
     ],
@@ -728,8 +763,49 @@
         "input": {
           "name": "Base Path",
           "type": "string",
-          "description": "Storage directory for Huggingface cache and model",
-          "default": "/runpod-volume",
+          "description": "Storage directory for Huggingface cache and model. Empty by default — start.sh auto-detects /runpod-volume (serverless) or /workspace (pod). Override with /models if you bake the model into the image.",
+          "advanced": true
+        }
+      },
+      {
+        "key": "LIMIT_MM_PER_PROMPT",
+        "input": {
+          "name": "Multimodal Limit Per Prompt",
+          "type": "string",
+          "description": "Per-modality limit for multimodal inputs. Comma-separated key=value, e.g. 'image=4,video=0'. For Qwen3-VL image-only serving, set to 'image=4,video=0' to skip the large video embedding reservation.",
+          "advanced": true
+        }
+      },
+      {
+        "key": "ATTENTION_BACKEND",
+        "input": {
+          "name": "Attention Backend",
+          "type": "string",
+          "description": "Override vLLM's attention backend. Defaults are sane (FA4 on SM100/SM103 Blackwell, FA3 on Hopper, FA2 elsewhere). Set to FLASH_ATTN to force FA on a Blackwell head-size that FlashInfer doesn't support.",
+          "options": [
+            { "label": "auto (default)", "value": "" },
+            { "label": "FLASH_ATTN", "value": "FLASH_ATTN" },
+            { "label": "FLASHINFER", "value": "FLASHINFER" },
+            { "label": "TRITON_FLASH_ATTN", "value": "TRITON_FLASH_ATTN" }
+          ],
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "MODEL_TASK",
+        "input": {
+          "name": "Model Task",
+          "type": "string",
+          "description": "Which OpenAI endpoint families to expose. 'generate' (default) serves chat/completion/responses/messages. 'embed' adds /v1/embeddings. 'score' (alias 'rerank') adds /v1/rerank, /rerank, /v2/rerank, /v1/score. 'classify' adds /v1/classify. 'all' enables every endpoint; 'auto' is a synonym.",
+          "options": [
+            { "label": "generate (chat/completion/responses)", "value": "generate" },
+            { "label": "embed (/v1/embeddings)", "value": "embed" },
+            { "label": "score / rerank (/v1/rerank, /v1/score)", "value": "score" },
+            { "label": "classify (/v1/classify)", "value": "classify" },
+            { "label": "all (enable every endpoint)", "value": "all" }
+          ],
+          "default": "generate",
           "advanced": true
         }
       },

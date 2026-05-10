@@ -19,7 +19,27 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest, ResponsesResponse
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
+from vllm.entrypoints.pooling.classify.serving import ServingClassification
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
+from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
+from vllm.entrypoints.pooling.scoring.protocol import RerankRequest, ScoreRequest
+from vllm.entrypoints.pooling.scoring.serving import ServingScores
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+
+
+# MODEL_TASK selects which OpenAI endpoint families this worker exposes.
+# - "generate" (default): chat / completion / responses / messages.
+# - "embed":   /v1/embeddings.
+# - "score":   /v1/rerank (+ /rerank, /v2/rerank), /v1/score.
+# - "classify":/v1/classify.
+# - "all":     all of the above. Constructing serving classes for tasks the
+#              loaded model can't actually run is cheap; the request will fail
+#              with a clear error from vLLM.
+_GENERATE_TASKS = {"generate", "all", "auto"}
+_EMBED_TASKS = {"embed", "all", "auto"}
+_SCORE_TASKS = {"score", "rerank", "all", "auto"}
+_CLASSIFY_TASKS = {"classify", "all", "auto"}
 
 from constants import DEFAULT_BATCH_SIZE, DEFAULT_BATCH_SIZE_GROWTH_FACTOR, DEFAULT_MAX_CONCURRENCY, DEFAULT_MIN_BATCH_SIZE
 from engine_args import get_engine_args
@@ -183,6 +203,15 @@ class OpenAIvLLMEngine(vLLMEngine):
         self.served_model_name = os.getenv("OPENAI_SERVED_MODEL_NAME_OVERRIDE") or self.engine_args.served_model_name or self.engine_args.model
         self.response_role = os.getenv("OPENAI_RESPONSE_ROLE") or "assistant"
         self.lora_adapters = self._load_lora_adapters()
+        self.model_task = (os.getenv("MODEL_TASK") or "generate").lower().strip()
+        if self.model_task not in (_GENERATE_TASKS | _EMBED_TASKS | _SCORE_TASKS | _CLASSIFY_TASKS):
+            logging.warning(
+                "MODEL_TASK=%r not recognised; falling back to 'generate'. "
+                "Valid values: generate, embed, score, rerank, classify, all, auto.",
+                self.model_task,
+            )
+            self.model_task = "generate"
+        logging.info("MODEL_TASK=%s", self.model_task)
 
         # Always defer OpenAI engine initialization to the first request.
         # asyncio.run() creates a temporary event loop that gets closed, but async
@@ -357,6 +386,38 @@ class OpenAIvLLMEngine(vLLMEngine):
             enable_force_include_usage=os.getenv('ENABLE_FORCE_INCLUDE_USAGE', 'false').lower() == 'true',
         )
 
+        # Pooling endpoints — only constructed when MODEL_TASK includes them.
+        # Constructing these against a generative model is cheap (the io_processor
+        # is created lazily on first request); they will fail with a clear vLLM
+        # error if the loaded model can't actually serve the requested task.
+        self.embedding_engine = None
+        self.scoring_engine = None
+        self.classification_engine = None
+        pooling_kwargs = dict(
+            engine_client=self.llm,
+            models=self.serving_models,
+            request_logger=None,
+            chat_template=chat_template,
+            chat_template_content_format="auto",
+            trust_request_chat_template=os.getenv('TRUST_REQUEST_CHAT_TEMPLATE', 'false').lower() == 'true',
+            return_tokens_as_token_ids=os.getenv('RETURN_TOKENS_AS_TOKEN_IDS', 'false').lower() == 'true',
+            log_error_stack=os.getenv('LOG_ERROR_STACK', 'false').lower() == 'true',
+        )
+        if self.model_task in _EMBED_TASKS:
+            self.embedding_engine = ServingEmbedding(**pooling_kwargs)
+            logging.info("Initialized ServingEmbedding (/v1/embeddings)")
+        if self.model_task in _SCORE_TASKS:
+            self.scoring_engine = ServingScores(
+                **pooling_kwargs,
+                enable_flash_late_interaction=os.getenv(
+                    'ENABLE_FLASH_LATE_INTERACTION', 'true'
+                ).lower() == 'true',
+            )
+            logging.info("Initialized ServingScores (/v1/rerank, /rerank, /v2/rerank, /v1/score)")
+        if self.model_task in _CLASSIFY_TASKS:
+            self.classification_engine = ServingClassification(**pooling_kwargs)
+            logging.info("Initialized ServingClassification (/v1/classify)")
+
         if hasattr(self.chat_engine, 'warmup'):
             import asyncio
             result = self.chat_engine.warmup()
@@ -367,19 +428,66 @@ class OpenAIvLLMEngine(vLLMEngine):
         # Ensure engines are ready (no-op if already initialized at startup)
         await self._ensure_engines_initialized()
 
-        if openai_request.openai_route == "/v1/models":
+        route = openai_request.openai_route
+        if route == "/v1/models":
             yield await self._handle_model_request()
-        elif openai_request.openai_route in ["/v1/chat/completions", "/v1/completions"]:
+        elif route in ("/v1/chat/completions", "/v1/completions"):
             async for response in self._handle_chat_or_completion_request(openai_request):
                 yield response
-        elif openai_request.openai_route == "/v1/responses":
+        elif route == "/v1/responses":
             async for response in self._handle_responses_request(openai_request):
                 yield response
-        elif openai_request.openai_route == "/v1/messages":
+        elif route == "/v1/messages":
             async for response in self._handle_messages_request(openai_request):
                 yield response
+        elif route == "/v1/embeddings":
+            yield await self._handle_pooling_request(
+                self.embedding_engine, EmbeddingRequest, openai_request, route,
+            )
+        elif route in ("/v1/rerank", "/rerank", "/v2/rerank"):
+            yield await self._handle_pooling_request(
+                self.scoring_engine, RerankRequest, openai_request, route,
+            )
+        elif route == "/v1/score":
+            yield await self._handle_pooling_request(
+                self.scoring_engine, ScoreRequest, openai_request, route,
+            )
+        elif route == "/v1/classify":
+            yield await self._handle_pooling_request(
+                self.classification_engine, ClassificationRequest, openai_request, route,
+            )
         else:
-            yield create_error_response("Invalid route").model_dump()
+            yield create_error_response(f"Invalid route: {route}").model_dump()
+
+    async def _handle_pooling_request(self, serving, request_class, openai_request, route):
+        if serving is None:
+            return create_error_response(
+                f"Route {route} is disabled — set MODEL_TASK to 'embed', 'score', "
+                f"'classify', or 'all' to enable it.",
+                err_type="BadRequestError",
+            ).model_dump()
+        try:
+            request = request_class(**openai_request.openai_input)
+        except Exception as e:
+            return create_error_response(str(e)).model_dump()
+        try:
+            response = await serving(request, raw_request=DummyRequest())
+        except Exception as e:
+            logging.exception("Pooling request failed (route=%s)", route)
+            return create_error_response(
+                str(e), err_type="InternalServerError",
+            ).model_dump()
+        # Pooling serving classes return a fastapi JSONResponse — extract its body.
+        body = getattr(response, "body", None)
+        if isinstance(body, (bytes, bytearray)):
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                return {"error": body.decode("utf-8", errors="replace")}
+        if isinstance(response, dict):
+            return response
+        # Fallback: stringify whatever came back so the client gets *something*.
+        return {"error": f"Unexpected response type: {type(response).__name__}"}
     
     async def _handle_model_request(self):
         models = await self.serving_models.show_available_models()

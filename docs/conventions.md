@@ -60,7 +60,7 @@ RunPod Request → handler.py → JobInput → Engine Selection → vLLM Generat
 
 #### Option 1: Pre-built Images (Recommended)
 
-- **Image**: `runpod/worker-v1-vllm:<version>` (see [GitHub Releases](https://github.com/runpod-workers/worker-vllm/releases))
+- **Image** (this fork): `ghcr.io/chrisbennight/worker-vllm-runpod:{cu128,cu130,vX.Y.Z-cu128,vX.Y.Z-cu130,latest}` (see [GitHub Releases](https://github.com/chrisbennight/worker-vllm-runpod/releases))
 - **Configuration**: Entirely via environment variables
 - **Model Loading**: Downloads model at runtime from Hugging Face
 - **Use Case**: Quick deployment, model experimentation
@@ -175,14 +175,13 @@ src/
 
 #### CI/CD Strategy:
 
-- **Development Builds**: All non-main branches → `runpod/worker-v1-vllm:dev-<branch-name>`
-- **Release Builds**: Git tags (numeric) only → `runpod/worker-v1-vllm:<version>`
-- **Dependency Updates**: Automated runpod package version monitoring
+- **Development Builds**: Manual `Dev Build` workflow → `ghcr.io/chrisbennight/worker-vllm-runpod:dev-cu128` and `:dev-cu130`
+- **Release Builds**: Git tags (`vX.Y.Z`) → `ghcr.io/chrisbennight/worker-vllm-runpod:vX.Y.Z-cu128` and `:vX.Y.Z-cu130`, plus `:cu128`, `:cu130`, `:latest` aliases
 
 #### Docker Bake Configuration:
 
-- **File**: `docker-bake.hcl` (flexible variable-based configuration)
-- **Variables**: `DOCKERHUB_REPO`, `DOCKERHUB_IMG`, `RELEASE_VERSION`, `HUGGINGFACE_ACCESS_TOKEN`
+- **File**: `docker-bake.hcl` (single source of truth for all version pins and tag construction)
+- **Variables**: `IMAGE_REF`, `TAG`, `VLLM_VERSION`, `TORCH_INDEX_SUFFIX`, `CUDA_VERSION_DASH`, `CUDA_BASE_IMAGE`, `MODEL_NAME`, `MODELS_MANIFEST`, `BASE_PATH`, `GIT_SHA`, `BUILD_DATE` (last two populated by CI for OCI provenance labels)
 - **Platform**: `linux/amd64` (GPU-optimized)
 
 ## Release & Versioning Strategy

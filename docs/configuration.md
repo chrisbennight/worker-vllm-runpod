@@ -119,6 +119,114 @@ The way this works is that the first request will have a batch size of `DEFAULT_
 | `DEFAULT_MIN_BATCH_SIZE`           | `1`     | `int`        | Batch size for the first request, which will be multiplied by the growth factor every subsequent request. |
 | `DEFAULT_BATCH_SIZE_GROWTH_FACTOR` | `3`     | `float`      | Growth factor for dynamic batch size.                                                                     |
 
+## Bake-time model fetch (`MODEL_NAME` + `MODELS_MANIFEST`)
+
+Models can be downloaded at build time (faster cold starts, larger images) or at runtime (smaller images, slower first request). Two bake modes are supported.
+
+### Single-model bake
+
+Set `MODEL_NAME` (and optionally `MODEL_REVISION` / `TOKENIZER_NAME` / `TOKENIZER_REVISION` / `QUANTIZATION`) as Docker build args. The model is downloaded into the standard HF Hub cache and `/local_model_args.json` is written so the runtime auto-resolves the cached path:
+
+```bash
+docker buildx bake -f docker-bake.hcl cu128 \
+    --set "*.args.MODEL_NAME=Qwen/Qwen3-VL-7B-Instruct" \
+    --set "*.args.BASE_PATH=/models"   # avoid /runpod-volume so a network volume mount doesn't shadow the bake
+```
+
+For private/gated models, pass `HF_TOKEN` as a BuildKit secret:
+
+```bash
+docker buildx bake -f docker-bake.hcl cu128 \
+    --set "*.args.MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct" \
+    --set "*.args.BASE_PATH=/models" \
+    --set "*.secrets.HF_TOKEN=$HF_TOKEN"
+```
+
+### Multi-model bake
+
+Set `MODELS_MANIFEST` to a JSON array. Each entry can carry `model`, `revision`, `tokenizer`, `tokenizer_revision`, `quantization`. All entries are downloaded into the same HF cache; runtime `MODEL_NAME` selects which one to load:
+
+```bash
+docker buildx bake -f docker-bake.hcl cu128 \
+    --set "*.args.BASE_PATH=/models" \
+    --set "*.args.MODELS_MANIFEST=$(cat <<'JSON'
+[
+  {"model": "Qwen/Qwen3-VL-7B-Instruct"},
+  {"model": "BAAI/bge-large-en-v1.5"},
+  {"model": "BAAI/bge-reranker-v2-m3"}
+]
+JSON
+)"
+```
+
+`MODELS_MANIFEST` takes precedence over `MODEL_NAME` when both are set. In multi-model mode, `/local_model_args.json` is **not** written — the runtime is expected to pick a model via `MODEL_NAME` and resolve it from the cache.
+
+### Verifying the bake at startup
+
+`start.sh` lists every cached model in `HF_HUB_CACHE` at boot, so you can confirm what's actually available before the engine tries to load it:
+
+```text
+[start] Cached models in HF_HUB_CACHE:
+  - Qwen/Qwen3-VL-7B-Instruct
+  - BAAI/bge-large-en-v1.5
+  - BAAI/bge-reranker-v2-m3
+```
+
+### `HF_HUB_OFFLINE=1` for fully-baked images
+
+If every model the worker will ever need is in the image (or pre-populated on the volume), set `HF_HUB_OFFLINE=1` (or `TRANSFORMERS_OFFLINE=1`) at runtime to skip every HuggingFace round-trip during boot. This prevents transient HF outages from delaying cold starts and removes one source of egress cost.
+
+| Variable             | Default | Type   | Description                                                                                                                      |
+| -------------------- | ------- | ------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `HF_HUB_OFFLINE`     | None    | `bool` | Skip all HF Hub network calls; only resolve from cache. Set to `1` for fully-baked or pre-populated-volume deployments.          |
+| `TRANSFORMERS_OFFLINE`| None   | `bool` | Skip all transformers HF calls. Pair with `HF_HUB_OFFLINE=1` for the strictest offline mode.                                     |
+
+## Multimodal (`LIMIT_MM_PER_PROMPT`, Qwen3-VL preset)
+
+For vision-language models like Qwen3-VL, set `LIMIT_MM_PER_PROMPT` (per-modality limit) to skip the large video embedding reservation when serving image-only traffic. The worker accepts the comma-separated form vLLM also accepts:
+
+| Variable               | Default | Type     | Description                                                                                                                                                              |
+| ---------------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LIMIT_MM_PER_PROMPT`  | None    | `str`    | Comma-separated `key=value` pairs, e.g. `image=4,video=0`. Highly recommended to set `video=0` for image-only Qwen3-VL serving — saves several GB of reserved VRAM.       |
+
+Recommended Qwen3-VL preset (image-only):
+
+```bash
+MODEL_NAME=Qwen/Qwen3-VL-7B-Instruct
+TRUST_REMOTE_CODE=true
+LIMIT_MM_PER_PROMPT=image=4,video=0
+MAX_MODEL_LEN=32768
+GPU_MEMORY_UTILIZATION=0.9
+```
+
+For video work, build the image with `--build-arg INSTALL_VIDEO_EXTRAS=true` (or `INSTALL_VIDEO_EXTRAS=true` in the bake target). This pulls in `decord` and `opencv-python-headless`. The default image is image- and text-only to stay slim.
+
+Open vLLM bug: `LIMIT_MM_PER_PROMPT` was reported as ineffective on some Qwen3-VL revisions ([vllm-project/vllm#38459](https://github.com/vllm-project/vllm/issues/38459)) — verify behaviour against your specific model revision before relying on it for capacity planning.
+
+## Endpoint Surface (`MODEL_TASK`)
+
+`MODEL_TASK` selects which OpenAI endpoint families this worker exposes. The default `generate` preserves the legacy upstream surface; setting `MODEL_TASK` to a pooling task enables the corresponding endpoints in addition to (not instead of) `generate`.
+
+| Variable     | Default      | Type/Choices                                                | Description                                                                                                                          |
+| ------------ | ------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `MODEL_TASK` | `generate`   | `generate`, `embed`, `score`, `rerank`, `classify`, `all`   | Which endpoint families to enable. Values are not mutually exclusive when set to `all` (or its synonym `auto`).                      |
+
+| Route                                          | Required `MODEL_TASK`        | Underlying vLLM serving class                                                  |
+| ---------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------ |
+| `/v1/chat/completions`, `/v1/completions`      | `generate` (default)         | `OpenAIServingChat`, `OpenAIServingCompletion`                                 |
+| `/v1/responses`                                | `generate`                   | `OpenAIServingResponses`                                                       |
+| `/v1/messages`                                 | `generate`                   | `AnthropicServingMessages`                                                     |
+| `/v1/embeddings`                               | `embed` / `all` / `auto`     | `vllm.entrypoints.pooling.embed.serving.ServingEmbedding`                      |
+| `/v1/rerank`, `/rerank`, `/v2/rerank`          | `score` / `rerank` / `all`   | `vllm.entrypoints.pooling.scoring.serving.ServingScores` (RerankRequest)       |
+| `/v1/score`                                    | `score` / `rerank` / `all`   | `vllm.entrypoints.pooling.scoring.serving.ServingScores` (ScoreRequest)        |
+| `/v1/classify`                                 | `classify` / `all` / `auto`  | `vllm.entrypoints.pooling.classify.serving.ServingClassification`              |
+
+Construction of pooling serving classes is cheap. If the loaded model can't actually serve the requested task (e.g. a generative model called against `/v1/embeddings`), vLLM raises a clear error at request time — the worker doesn't pre-validate.
+
+| Variable                          | Default | Type/Choices | Description                                                                                                                  |
+| --------------------------------- | ------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `ENABLE_FLASH_LATE_INTERACTION`   | `true`  | `bool`       | Enable Flash late-interaction kernels for cross-encoder rerankers when the loaded model supports it. Falls back transparently. |
+
 ## OpenAI Compatibility Settings
 
 | Variable                            | Default     | Type/Choices     | Description                                                                                                                                                                                                       |
@@ -183,10 +291,15 @@ Any vLLM `AsyncEngineArgs` field can be set via an environment variable using th
 
 These variables are used when building custom Docker images with models baked in:
 
-| Variable              | Default          | Type  | Description                                       |
-| --------------------- | ---------------- | ----- | ------------------------------------------------- |
-| `BASE_PATH`           | `/runpod-volume` | `str` | Storage directory for huggingface cache and model |
-| `WORKER_CUDA_VERSION` | `12.1.0`         | `str` | CUDA version for the worker image                 |
+| Variable              | Default          | Type   | Description                                                                                                                                                                                  |
+| --------------------- | ---------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VLLM_VERSION`        | `0.20.2`         | `str`  | vLLM version installed in the builder stage. Set in `docker-bake.hcl`.                                                                                                                       |
+| `TORCH_INDEX_SUFFIX`  | `cu128`          | `str`  | PyTorch wheel index suffix (`cu128` for the default image, `cu130` for the Blackwell variant). Set in `docker-bake.hcl`.                                                                     |
+| `CUDA_VERSION_DASH`   | `12-8`           | `str`  | CUDA APT package suffix (`12-8` or `13-0`). Selects the `cuda-minimal-build-*` package in the builder stage. Set in `docker-bake.hcl`.                                                       |
+| `CUDA_BASE_IMAGE`     | `nvidia/cuda:12.8.1-base-ubuntu24.04` | `str` | NVIDIA CUDA base image. Set in `docker-bake.hcl`.                                                                                                                |
+| `BASE_PATH`           | *(auto-detect)*  | `str`  | Storage root. Empty by default — `start.sh` auto-detects `/runpod-volume` (serverless) or `/workspace` (pod). Override with e.g. `/models` if you bake the model into the image.             |
+| `MODEL_NAME`          | *(empty)*        | `str`  | Single-model bake. If set, `download_model.py` runs at build time and writes `/local_model_args.json`.                                                                                       |
+| `MODELS_MANIFEST`     | *(empty)*        | `JSON` | Multi-model bake. JSON array of `{"model": "...", "revision": "...", "quantization": "..."}` entries. Takes precedence over `MODEL_NAME`. Each model is downloaded into the standard HF cache. |
 
 ## Deprecated Variables
 

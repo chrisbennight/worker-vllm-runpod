@@ -5,7 +5,6 @@ import logging
 from typing import get_origin, get_args
 from torch.cuda import device_count
 from vllm import AsyncEngineArgs
-from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from src.utils import convert_limit_mm_per_prompt
 
 # Backward-compat: env var names users already know → engine arg name
@@ -368,9 +367,13 @@ def _resolve_cached_model_path(model_name: str) -> str:
     if os.path.isabs(model_name):
         return model_name
 
+    # Resolution order matches HuggingFace's own: explicit HF_HUB_CACHE wins,
+    # then the legacy HUGGINGFACE_HUB_CACHE alias, then HF_HOME/hub (HF_HOME is
+    # the parent dir, *not* the hub dir), then the user-default cache.
     cache_dir = (
-        os.getenv("HUGGINGFACE_HUB_CACHE")
-        or os.getenv("HF_HOME")
+        os.getenv("HF_HUB_CACHE")
+        or os.getenv("HUGGINGFACE_HUB_CACHE")
+        or (os.path.join(os.getenv("HF_HOME"), "hub") if os.getenv("HF_HOME") else None)
         or os.path.expanduser("~/.cache/huggingface/hub")
     )
 
@@ -452,11 +455,6 @@ def get_engine_args():
     if limit_mm_env is not None:
         args["limit_mm_per_prompt"] = convert_limit_mm_per_prompt(limit_mm_env)
 
-    # if args.get("TENSORIZER_URI"): TODO: add back once tensorizer is ready
-    #     args["load_format"] = "tensorizer"
-    #     args["model_loader_extra_config"] = TensorizerConfig(tensorizer_uri=args["TENSORIZER_URI"], num_readers=None)
-    #     logging.info(f"Using tensorized model from {args['TENSORIZER_URI']}")
-
     if "hf_overrides" in args:
         sanitized = _sanitize_hf_overrides(args["hf_overrides"])
         if sanitized:
@@ -530,10 +528,6 @@ def get_engine_args():
         args["max_seq_len_to_capture"] = int(os.getenv("MAX_CONTEXT_LEN_TO_CAPTURE"))
         logging.warning("Using MAX_CONTEXT_LEN_TO_CAPTURE is deprecated. Please use MAX_SEQ_LEN_TO_CAPTURE instead.")
         
-    # if "gemma-2" in args.get("model", "").lower():
-    #     os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
-    #     logging.info("Using FLASHINFER for gemma-2 model.")
-    
     # Set max_num_batched_tokens to max_model_len for unlimited batching.
     # vLLM defaults max_num_batched_tokens to 2048 when None, which is too low.
 
