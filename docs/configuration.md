@@ -119,6 +119,68 @@ The way this works is that the first request will have a batch size of `DEFAULT_
 | `DEFAULT_MIN_BATCH_SIZE`           | `1`     | `int`        | Batch size for the first request, which will be multiplied by the growth factor every subsequent request. |
 | `DEFAULT_BATCH_SIZE_GROWTH_FACTOR` | `3`     | `float`      | Growth factor for dynamic batch size.                                                                     |
 
+## Bake-time model fetch (`MODEL_NAME` + `MODELS_MANIFEST`)
+
+Models can be downloaded at build time (faster cold starts, larger images) or at runtime (smaller images, slower first request). Two bake modes are supported.
+
+### Single-model bake
+
+Set `MODEL_NAME` (and optionally `MODEL_REVISION` / `TOKENIZER_NAME` / `TOKENIZER_REVISION` / `QUANTIZATION`) as Docker build args. The model is downloaded into the standard HF Hub cache and `/local_model_args.json` is written so the runtime auto-resolves the cached path:
+
+```bash
+docker buildx bake -f docker-bake.hcl cu128 \
+    --set "*.args.MODEL_NAME=Qwen/Qwen3-VL-7B-Instruct" \
+    --set "*.args.BASE_PATH=/models"   # avoid /runpod-volume so a network volume mount doesn't shadow the bake
+```
+
+For private/gated models, pass `HF_TOKEN` as a BuildKit secret:
+
+```bash
+docker buildx bake -f docker-bake.hcl cu128 \
+    --set "*.args.MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct" \
+    --set "*.args.BASE_PATH=/models" \
+    --set "*.secrets.HF_TOKEN=$HF_TOKEN"
+```
+
+### Multi-model bake
+
+Set `MODELS_MANIFEST` to a JSON array. Each entry can carry `model`, `revision`, `tokenizer`, `tokenizer_revision`, `quantization`. All entries are downloaded into the same HF cache; runtime `MODEL_NAME` selects which one to load:
+
+```bash
+docker buildx bake -f docker-bake.hcl cu128 \
+    --set "*.args.BASE_PATH=/models" \
+    --set "*.args.MODELS_MANIFEST=$(cat <<'JSON'
+[
+  {"model": "Qwen/Qwen3-VL-7B-Instruct"},
+  {"model": "BAAI/bge-large-en-v1.5"},
+  {"model": "BAAI/bge-reranker-v2-m3"}
+]
+JSON
+)"
+```
+
+`MODELS_MANIFEST` takes precedence over `MODEL_NAME` when both are set. In multi-model mode, `/local_model_args.json` is **not** written — the runtime is expected to pick a model via `MODEL_NAME` and resolve it from the cache.
+
+### Verifying the bake at startup
+
+`start.sh` lists every cached model in `HF_HUB_CACHE` at boot, so you can confirm what's actually available before the engine tries to load it:
+
+```text
+[start] Cached models in HF_HUB_CACHE:
+  - Qwen/Qwen3-VL-7B-Instruct
+  - BAAI/bge-large-en-v1.5
+  - BAAI/bge-reranker-v2-m3
+```
+
+### `HF_HUB_OFFLINE=1` for fully-baked images
+
+If every model the worker will ever need is in the image (or pre-populated on the volume), set `HF_HUB_OFFLINE=1` (or `TRANSFORMERS_OFFLINE=1`) at runtime to skip every HuggingFace round-trip during boot. This prevents transient HF outages from delaying cold starts and removes one source of egress cost.
+
+| Variable             | Default | Type   | Description                                                                                                                      |
+| -------------------- | ------- | ------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `HF_HUB_OFFLINE`     | None    | `bool` | Skip all HF Hub network calls; only resolve from cache. Set to `1` for fully-baked or pre-populated-volume deployments.          |
+| `TRANSFORMERS_OFFLINE`| None   | `bool` | Skip all transformers HF calls. Pair with `HF_HUB_OFFLINE=1` for the strictest offline mode.                                     |
+
 ## Multimodal (`LIMIT_MM_PER_PROMPT`, Qwen3-VL preset)
 
 For vision-language models like Qwen3-VL, set `LIMIT_MM_PER_PROMPT` (per-modality limit) to skip the large video embedding reservation when serving image-only traffic. The worker accepts the comma-separated form vLLM also accepts:

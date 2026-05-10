@@ -34,4 +34,17 @@ echo "[start] HF_HOME=$HF_HOME"
 echo "[start] HF_HUB_CACHE=$HF_HUB_CACHE"
 echo "[start] VLLM_CACHE_ROOT=$VLLM_CACHE_ROOT"
 
+# List models present in the HF Hub cache so the operator can confirm what's
+# actually available before vLLM tries to load MODEL_NAME. Useful when the
+# image was built with MODELS_MANIFEST and you want to see which entries
+# survived the bake (or what's already on the volume).
+if [ -d "$HF_HUB_CACHE" ]; then
+    cached=$(find "$HF_HUB_CACHE" -maxdepth 1 -type d -name "models--*" 2>/dev/null \
+              | sed -E 's|.*models--||; s|--|/|' | sort)
+    if [ -n "$cached" ]; then
+        echo "[start] Cached models in HF_HUB_CACHE:"
+        echo "$cached" | sed 's/^/  - /'
+    fi
+fi
+
 exec python3 /src/handler.py
