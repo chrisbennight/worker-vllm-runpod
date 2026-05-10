@@ -86,15 +86,31 @@ ARG CUDA_VERSION_DASH=12-8
 
 # Runtime deps only. No build-essentials, no CUDA toolkit (just the base
 # runtime that comes with the CUDA base image).
+#
+# cuda-cudart-12-8 is installed *unconditionally* — vLLM 0.20.2 ships a
+# precompiled nixl_ep extension (NIXL all-to-all helper for MoE) that
+# links against libcudart.so.12 regardless of which CUDA wheel suffix
+# vLLM was installed with. On the cu130 base image (which only has
+# libcudart.so.13), startup crashes with:
+#   ImportError: libcudart.so.12: cannot open shared object file
+# On the cu128 base image this package is already present from the base,
+# so re-declaring it is a no-op there.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3.12 \
         python3.12-venv \
         ca-certificates \
         curl \
+        cuda-cudart-12-8 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED
+
+# Make the libcudart 12 shim discoverable by the dynamic linker. On cu128
+# this just re-confirms /usr/local/cuda-12.8/lib64; on cu130 it adds the
+# back-compat path alongside the cu130 libs.
+RUN echo "/usr/local/cuda-12.8/lib64" > /etc/ld.so.conf.d/cuda-12-compat.conf && \
+    ldconfig
 
 # Install python alternatives so `python3` and `python` resolve to 3.12.
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
