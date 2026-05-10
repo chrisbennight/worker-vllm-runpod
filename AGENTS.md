@@ -4,68 +4,65 @@ Guidance for AI agents (and humans) working in this repo.
 
 ## Intent
 
-This is a slim, opinionated [vLLM](https://github.com/vllm-project/vllm) serverless worker for **RunPod Serverless**, forked from [`runpod-workers/worker-vllm`](https://github.com/runpod-workers/worker-vllm). The fork makes three deliberate changes:
+This is a slim, opinionated **pod-mode** [vLLM](https://github.com/vllm-project/vllm) image for **RunPod pods**, originally forked from [`runpod-workers/worker-vllm`](https://github.com/runpod-workers/worker-vllm). Three deliberate divergences from upstream:
 
-1. **Owned image lineage**: published to GHCR as `ghcr.io/chrisbennight/worker-vllm-runpod` instead of DockerHub `runpod/worker-v1-vllm`. CI uses `GITHUB_TOKEN`; no DockerHub credentials.
-2. **Blackwell-first build matrix**: two CUDA variants — `:cu128` (default, covers Ampere/Hopper/Blackwell SM100) and `:cu130` (Blackwell-only, FP4 block-scaled cuBLAS). Single Dockerfile, controlled by build args from `docker-bake.hcl`. Mirrors the [`comfyui-base-runpod`](https://github.com/chrisbennight/comfyui-base-runpod) layout so both projects can share one Network Volume.
-3. **Broader endpoint surface**: in addition to `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and `/v1/messages` (Anthropic), the worker also serves `/v1/embeddings`, `/v1/rerank` (+ `/rerank`, `/v2/rerank`), `/v1/score`, and `/v1/classify` so a single image can serve generation, embedding, and reranker models.
+1. **Pod mode, not serverless.** Upstream is a Runpod *serverless* worker that pulls jobs from Runpod's queue via the `runpod` Python SDK. This image runs `vllm serve` directly and exposes the standard OpenAI-compatible HTTP server on port 8000 — same shape as `vllm/vllm-openai:*`, but parameterised the way we want.
+2. **Owned image lineage.** Published to GHCR as `ghcr.io/chrisbennight/worker-vllm-runpod` instead of DockerHub `runpod/worker-v1-vllm`. CI uses `GITHUB_TOKEN`; no DockerHub credentials.
+3. **Blackwell-first build matrix.** Two CUDA variants — `:cu128` (default, covers Ampere/Hopper/Blackwell SM100 with FA4) and `:cu130` (Blackwell-only, FP4 block-scaled cuBLAS). Single Dockerfile, controlled by build args from `docker-bake.hcl`. Mirrors the [`comfyui-base-runpod`](https://github.com/chrisbennight/comfyui-base-runpod) layout so both projects can share one Network Volume.
 
 Side effects of the fork:
 - Multi-stage build with a hash-verified Python lockfile generated at build time (`pip-compile --generate-hashes`).
 - Standard HF cache layout (`<volume>/.cache/huggingface/{hub,datasets}`), aligning with `comfyui-base-runpod` so the same volume can host both stacks without duplicating model weights.
-- Auto-detects whether the volume is mounted at `/workspace` (pod) or `/runpod-volume` (serverless) and exports `BASE_PATH` accordingly.
-- Drops dead Tensorizer scaffolding, the runtime `pip install transformers==X` shim, and the upstream Slack notification workflows.
+- Auto-detects whether the volume is mounted at `/workspace` (pod) or `/runpod-volume` (legacy/serverless) and exports `BASE_PATH` accordingly.
+- Optional bake-time model fetch: `MODEL_NAME` (single) or `MODELS_MANIFEST` (JSON array).
 
 ## File map
 
 | Path | What it owns |
 |---|---|
-| `Dockerfile` | Multi-stage build. Stage 1 (builder) installs Python 3.12, generates a hashed lockfile (`pip-compile --generate-hashes`), and installs all Python deps including `vllm[flashinfer]`. Stage 2 (runtime) is a slim runtime image with the Python deps copied over. Same Dockerfile for both CUDA variants — controlled by `CUDA_VERSION_DASH` and `TORCH_INDEX_SUFFIX` build args. |
+| `Dockerfile` | Multi-stage build. Stage 1 (builder) installs Python 3.12, generates a hashed lockfile (`pip-compile --generate-hashes`), and installs all Python deps including `vllm[flashinfer]`. Stage 2 (runtime) is a slim runtime image with the Python deps copied over. Same Dockerfile for both CUDA variants — controlled by `CUDA_VERSION_DASH` and `TORCH_INDEX_SUFFIX` build args. EXPOSEs port 8000. |
 | `docker-bake.hcl` | **Single source of truth** for every pinned version (vLLM, PyTorch, CUDA), the GHCR image reference, and the build target matrix. Targets: `cu128`, `cu130`, `dev`, `devpush-cu128`, `devpush-cu130`. |
-| `builder/requirements.in` | Top-level Python deps that get fed into `pip-compile`. Kept small — vLLM and its transitive set carry most of the dependency tree. |
-| `src/start.sh` | Runtime entrypoint. Detects whether `/runpod-volume` or `/workspace` is mounted, sets `BASE_PATH` and `HF_HOME`/`HF_HUB_CACHE`/`TORCH_HOME`/`VLLM_CACHE_ROOT` accordingly, then `exec`s the handler. |
-| `src/handler.py` | Runpod serverless `runpod.serverless.start(...)` entry point and request dispatch. |
-| `src/engine.py` | `vLLMEngine` (raw streaming) + `OpenAIvLLMEngine` (chat / completion / responses / messages / embeddings / rerank / score / classify). |
-| `src/engine_args.py` | Auto-discovers any `AsyncEngineArgs` field from upper-cased env vars. Bespoke handlers for speculative decoding, LMCache, HF cache lowercase fallback, `hf_overrides` rope_scaling sanitization. |
+| `builder/requirements.in` | Top-level Python deps that get fed into `pip-compile`. Kept small — vLLM and its transitive set carry most of the dependency tree. No runpod-serverless SDK. |
+| `src/start.sh` | Runtime entrypoint. Detects whether `/workspace` or `/runpod-volume` is mounted, sets `BASE_PATH` and `HF_HOME`/`HF_HUB_CACHE`/`TORCH_HOME`/`VLLM_CACHE_ROOT`, lists cached models, builds a `vllm serve` CLI from env vars, then `exec`s it. |
 | `src/download_model.py` | Optional bake-time model fetch. Accepts a single `MODEL_NAME` *or* a `MODELS_MANIFEST` JSON list, and downloads each into the standard HF hub cache. |
-| `.runpod/hub.json` | RunPod Hub UI surface — env-var presets and choices. |
 | `.github/workflows/release.yml` | Tag-driven release pushing `:vX.Y.Z-cu128`, `:cu128`, `:latest`, `:vX.Y.Z-cu130`, `:cu130` to GHCR. Auths with `GITHUB_TOKEN`. |
 | `.github/workflows/dev.yml` | Manual dev workflow that pushes `:dev-cu128` and `:dev-cu130` without touching `:latest`. |
-| `.github/workflows/pr.yml` | Automatic PR build. Runs on every push to a PR branch, builds both CUDA variants in parallel, pushes them to GHCR as `:pr-<num>-cu128` and `:pr-<num>-cu130`. The build is the merge gate — see "Branch and PR policy" below. |
+| `.github/workflows/pr.yml` | Automatic PR build. Runs on every push to a PR branch, builds both CUDA variants in parallel, pushes them to GHCR as `:pr-<num>-cu128` and `:pr-<num>-cu130`. The build is the merge gate. |
 | `.github/workflows/pr-cleanup.yml` | Deletes the `:pr-<num>-*` tags from GHCR when the PR closes. |
 | `.github/pull_request_template.md` | Required PR template — see "Branch and PR policy". |
-| `CHANGELOG.md` | Has a "fork divergence" section at the top documenting how this image differs from upstream `runpod-workers/worker-vllm`. |
-| `docs/configuration.md` | All env vars, defaults, and choices for runtime configuration. |
+| `CHANGELOG.md` | Has a "fork divergence" section at the top documenting how this image differs from upstream `runpod-workers/worker-vllm`, plus a "Pod-mode pivot" section explaining the move away from the runpod-serverless surface. |
+| `docs/configuration.md` | All env vars the pod entrypoint understands, plus the recommended Qwen3-VL / Blackwell preset and the bake-time model fetch reference. |
 
 ## Architecture invariants
 
 These are load-bearing — break them and the image stops working as designed.
 
 - **`docker-bake.hcl` owns every version pin.** The Dockerfile declares `ARG` names but their defaults come from bake. Don't hard-code versions in the Dockerfile.
-- **No runtime installs.** `start.sh` must never call `pip install`. All Python deps are baked at build time with hash verification. The legacy `TRANSFORMERS_VERSION` runtime install hook has been removed; pin it in the lockfile instead.
-- **One Dockerfile, both CUDA variants.** Don't fork into `Dockerfile.cu130`. The build args (`CUDA_VERSION_DASH`, `TORCH_INDEX_SUFFIX`, `TORCH_INDEX_URL`) handle it.
+- **No runtime installs.** `start.sh` must never call `pip install`. All Python deps are baked at build time with hash verification.
+- **One Dockerfile, both CUDA variants.** Don't fork into `Dockerfile.cu130`. The build args (`CUDA_VERSION_DASH`, `TORCH_INDEX_SUFFIX`, `CUDA_BASE_IMAGE`) handle it.
 - **Cache paths align with `comfyui-base-runpod`.** Models share `<volume>/.cache/huggingface/hub` so both stacks reuse the same weights. vLLM-private artifacts (torch.compile cache, CUDA graphs, LMCache disk tier) live under `<volume>/.cache/vllm/` so they never collide with comfy's state.
-- **`BASE_PATH` auto-detects the mount point.** Pods mount the volume at `/workspace`, serverless workers at `/runpod-volume`. `start.sh` picks whichever exists. Don't hard-code either path in the application code.
+- **`BASE_PATH` auto-detects the mount point.** Pods mount the volume at `/workspace`; the script checks that first, falling back to `/runpod-volume` if a legacy mount is in use. Don't hard-code either path in the application code.
+- **Container speaks HTTP on port 8000, not the Runpod job queue.** `start.sh` exec's `vllm serve`; the runpod-serverless SDK is not installed and the legacy `python3 /src/handler.py` entry point is gone. Any future code that calls `runpod.serverless.start(...)` belongs in a different image.
 - **GHCR-only publishing.** No DockerHub. The release workflow uses `secrets.GITHUB_TOKEN`; no manual secret setup is needed beyond `HF_TOKEN` for gated-model bakes.
-- **Tag scheme**: `:cu128`, `:cu130`, `:vX.Y.Z-cu128`, `:vX.Y.Z-cu130`, `:latest` (alias for `:cu128`). The old `runpod/worker-v1-vllm:vX.Y.Z` DockerHub tags are not produced by this fork.
+- **Tag scheme**: `:cu128`, `:cu130`, `:vX.Y.Z-cu128`, `:vX.Y.Z-cu130`, `:latest` (alias for `:cu128`).
 
 ## Common change recipes
 
 ### Bump vLLM
 - Edit `VLLM_VERSION` in `docker-bake.hcl`. Lockfile regenerates at build time so the new vLLM dependency tree is picked up automatically.
 - Verify the `attention_backend` defaults still match expectations on Blackwell — vLLM's defaults change occasionally (e.g. FA4 → TRTLLM on SM100).
+- If new CLI flags landed that callers want to surface via env, add `_kv` / `_flag` lines in `src/start.sh`.
 
 ### Bump PyTorch / CUDA
-- Edit `TORCH_VERSION` (cu128 default) and `TORCH_VERSION_CU130` blocks in `docker-bake.hcl`.
-- For new minor CUDA versions: also update `CUDA_VERSION_DASH` and the base image tag in the Dockerfile. The base image moves rarely; flag it in the PR.
+- Edit the corresponding variables in `docker-bake.hcl`.
+- For new minor CUDA versions: also update the base image tag. The base image moves rarely; flag it in the PR.
 
 ### Add a new top-level Python dep
 - Add to `builder/requirements.in`. Lockfile regenerates on next build. Don't commit `requirements.lock` — it's per-CUDA-variant and built fresh in CI.
 
-### Add a new endpoint or change request shape
-- Plumb through `src/engine.py` (`OpenAIvLLMEngine.generate` route dispatch) and `src/handler.py` if needed.
-- Update `docs/configuration.md` and `.runpod/hub.json` if there's a new env var.
-- Update this file under "Architecture invariants" if it changes the surface.
+### Add a new env-var → CLI-flag mapping
+- Add a `_kv ENV --flag` (string/numeric) or `_flag ENV --flag` (boolean) line in the relevant section of `src/start.sh`.
+- Document the env var in `docs/configuration.md`.
 
 ## Branch and PR policy
 
@@ -108,8 +105,8 @@ ghcr.io/chrisbennight/worker-vllm-runpod:pr-<num>-cu128
 ghcr.io/chrisbennight/worker-vllm-runpod:pr-<num>-cu130
 ```
 
-Pull either to test on a RunPod endpoint before merging. `pr-cleanup.yml`
-deletes both tags when the PR closes.
+Pull either to test on a RunPod pod before merging. `pr-cleanup.yml` deletes
+both tags when the PR closes.
 
 ## Validate before pushing
 
@@ -127,11 +124,14 @@ python3 -m compileall -q src/
 
 # 4. Dockerfile syntax (cheap)
 docker buildx build --check -f Dockerfile .
+
+# 5. Dry-run start.sh's CLI-build logic
+cp src/start.sh /tmp/test.sh
+sed -i.bak 's|^exec vllm serve|echo DRYRUN vllm serve|' /tmp/test.sh
+MODEL_NAME=... MAX_MODEL_LEN=... bash /tmp/test.sh
 ```
 
-For real validation, push a branch and trigger the **Dev Build** workflow with `push=true`. It builds both variants on GHA and pushes `:dev-cu128` / `:dev-cu130`. That's the cheapest "did this actually work" loop.
-
-Avoid running `docker buildx bake dev` locally unless you actually need to iterate on something the bake/syntax checks can't catch — pulling all the wheels is multi-GB.
+For real validation, push a branch and let `pr.yml` build both variants on GHA. That's the cheapest "did this actually work" loop.
 
 ## Releasing
 
@@ -144,20 +144,7 @@ Tag-driven. `git tag vX.Y.Z && git push origin vX.Y.Z` triggers `release.yml` wh
 - That tag points at the same commit as `HEAD`, AND
 - The working tree is clean.
 
-This makes `workflow_dispatch` from `main` with a non-existent version fail loud instead of silently producing a `:vX.Y.Z-cu128` image with no matching tag. To dispatch manually, push the tag first and select that tag as the workflow ref.
-
-**Provenance labels.** Every published image carries OCI standard labels populated from the build environment:
-
-| Label | Source |
-|---|---|
-| `org.opencontainers.image.title` | hard-coded `worker-vllm-runpod` |
-| `org.opencontainers.image.source` / `.url` | hard-coded GitHub repo URL |
-| `org.opencontainers.image.licenses` | hard-coded `MIT` |
-| `org.opencontainers.image.version` | `TAG` env (the git tag for releases, `dev` for dev builds) |
-| `org.opencontainers.image.revision` | `GIT_SHA` env (`git rev-parse HEAD` from the build) |
-| `org.opencontainers.image.created` | `BUILD_DATE` env (RFC3339 timestamp from the build) |
-
-Inspect with `docker buildx imagetools inspect <image>` or `docker inspect <image> --format '{{json .Config.Labels}}'`. For local builds the provenance labels are empty (intentional — local builds shouldn't claim provenance).
+**Provenance labels.** Every published image carries OCI standard labels populated from the build environment (`org.opencontainers.image.{title,source,url,licenses,version,revision,created}`). Inspect with `docker buildx imagetools inspect <image>`.
 
 ## Public repo conventions
 
@@ -175,6 +162,6 @@ This repo is **public**. Anything committed is visible on GitHub. Therefore:
 - `docker buildx bake --print` resolves cleanly with the new args.
 - Shell scripts pass `bash -n`.
 - Python files pass `python3 -m compileall -q src/`.
-- `docs/configuration.md` and `.runpod/hub.json` are updated when the user-visible env-var surface moves.
+- `docs/configuration.md` is updated when the user-visible env-var surface moves.
 - `CHANGELOG.md` has an entry under the relevant section.
 - No commented-out code, no scratch files, no version drift between `docker-bake.hcl` and Dockerfile defaults.
