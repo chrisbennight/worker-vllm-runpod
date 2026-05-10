@@ -119,6 +119,28 @@ The way this works is that the first request will have a batch size of `DEFAULT_
 | `DEFAULT_MIN_BATCH_SIZE`           | `1`     | `int`        | Batch size for the first request, which will be multiplied by the growth factor every subsequent request. |
 | `DEFAULT_BATCH_SIZE_GROWTH_FACTOR` | `3`     | `float`      | Growth factor for dynamic batch size.                                                                     |
 
+## Multimodal (`LIMIT_MM_PER_PROMPT`, Qwen3-VL preset)
+
+For vision-language models like Qwen3-VL, set `LIMIT_MM_PER_PROMPT` (per-modality limit) to skip the large video embedding reservation when serving image-only traffic. The worker accepts the comma-separated form vLLM also accepts:
+
+| Variable               | Default | Type     | Description                                                                                                                                                              |
+| ---------------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LIMIT_MM_PER_PROMPT`  | None    | `str`    | Comma-separated `key=value` pairs, e.g. `image=4,video=0`. Highly recommended to set `video=0` for image-only Qwen3-VL serving — saves several GB of reserved VRAM.       |
+
+Recommended Qwen3-VL preset (image-only):
+
+```bash
+MODEL_NAME=Qwen/Qwen3-VL-7B-Instruct
+TRUST_REMOTE_CODE=true
+LIMIT_MM_PER_PROMPT=image=4,video=0
+MAX_MODEL_LEN=32768
+GPU_MEMORY_UTILIZATION=0.9
+```
+
+For video work, build the image with `--build-arg INSTALL_VIDEO_EXTRAS=true` (or `INSTALL_VIDEO_EXTRAS=true` in the bake target). This pulls in `decord` and `opencv-python-headless`. The default image is image- and text-only to stay slim.
+
+Open vLLM bug: `LIMIT_MM_PER_PROMPT` was reported as ineffective on some Qwen3-VL revisions ([vllm-project/vllm#38459](https://github.com/vllm-project/vllm/issues/38459)) — verify behaviour against your specific model revision before relying on it for capacity planning.
+
 ## Endpoint Surface (`MODEL_TASK`)
 
 `MODEL_TASK` selects which OpenAI endpoint families this worker exposes. The default `generate` preserves the legacy upstream surface; setting `MODEL_TASK` to a pooling task enables the corresponding endpoints in addition to (not instead of) `generate`.

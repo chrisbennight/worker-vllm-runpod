@@ -69,6 +69,13 @@ variable "MODELS_MANIFEST" {
   default = ""
 }
 
+# Pull in decord + opencv-python-headless for video multimodal workloads
+# (Qwen3-VL with video=N>0). Off by default to keep the image slim for
+# image-only and text-only deployments.
+variable "INSTALL_VIDEO_EXTRAS" {
+  default = "false"
+}
+
 # Storage location used at bake time. Default empty → start.sh auto-detects at
 # runtime. Set to e.g. "/models" if you intend to bake the model into the image
 # and don't want it shadowed by a network volume mounted at /runpod-volume.
@@ -105,8 +112,9 @@ target "common" {
     TOKENIZER_NAME     = TOKENIZER_NAME
     TOKENIZER_REVISION = TOKENIZER_REVISION
     QUANTIZATION       = QUANTIZATION
-    MODELS_MANIFEST    = MODELS_MANIFEST
-    BASE_PATH          = BASE_PATH
+    MODELS_MANIFEST      = MODELS_MANIFEST
+    INSTALL_VIDEO_EXTRAS = INSTALL_VIDEO_EXTRAS
+    BASE_PATH            = BASE_PATH
   }
 }
 

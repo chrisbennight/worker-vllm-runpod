@@ -10,6 +10,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG VLLM_VERSION=0.20.2
 ARG CUDA_VERSION_DASH=12-8
 ARG TORCH_INDEX_SUFFIX=cu128
+# Pull in decord + opencv-python-headless when set, for video multimodal
+# workloads (Qwen3-VL with video=N>0). Off by default to keep the image slim
+# for image-only and text-only deployments.
+ARG INSTALL_VIDEO_EXTRAS=false
 
 # Install Python 3.12 + build essentials + CUDA build packages (only in
 # builder so we don't pay the size in the runtime layer).
@@ -50,6 +54,10 @@ WORKDIR /tmp/build
 RUN { cat requirements.in; \
       echo ""; \
       echo "vllm[flashinfer]==${VLLM_VERSION}"; \
+      if [ "${INSTALL_VIDEO_EXTRAS}" = "true" ]; then \
+          echo "decord"; \
+          echo "opencv-python-headless"; \
+      fi; \
     } > requirements.full.in && \
     PIP_INDEX_URL=https://pypi.org/simple \
     PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/${TORCH_INDEX_SUFFIX}" \
