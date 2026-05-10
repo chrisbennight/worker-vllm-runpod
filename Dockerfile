@@ -84,14 +84,21 @@ ENV PYTHONUNBUFFERED=1
 
 ARG CUDA_VERSION_DASH=12-8
 
-# Runtime deps only. No build-essentials, no CUDA toolkit (just the base
-# runtime that comes with the CUDA base image).
+# Runtime deps + a working C/C++ toolchain.
 #
-# cuda-cudart-12-8 is installed *unconditionally* — vLLM 0.20.2 ships a
-# precompiled nixl_ep extension (NIXL all-to-all helper for MoE) that
-# links against libcudart.so.12 regardless of which CUDA wheel suffix
-# vLLM was installed with. On the cu130 base image (which only has
-# libcudart.so.13), startup crashes with:
+# Why build-essential at runtime: PyTorch's torch.compile/inductor backend
+# triggers Triton's JIT, which compiles CUDA driver utilities on first use
+# via a gcc invocation. Without a C compiler on PATH the engine crashes
+# during profile_run with:
+#   torch._inductor.exc.InductorError: Failed to find C compiler.
+# The builder stage has build-essential, but multi-stage copy only grabs
+# /usr/local/lib/python3.12 + /usr/local/bin, so gcc (in /usr/bin/) is
+# stripped. Re-install it here. Adds ~300 MB to a ~12 GB image.
+#
+# Why cuda-cudart-12-8: vLLM 0.20.2 ships a precompiled nixl_ep extension
+# (NIXL all-to-all helper for MoE) that links against libcudart.so.12
+# regardless of which CUDA wheel suffix vLLM was installed with. On the
+# cu130 base image (which only has libcudart.so.13), startup crashes:
 #   ImportError: libcudart.so.12: cannot open shared object file
 # On the cu128 base image this package is already present from the base,
 # so re-declaring it is a no-op there.
@@ -99,6 +106,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3.12 \
         python3.12-venv \
+        python3.12-dev \
+        build-essential \
         ca-certificates \
         curl \
         cuda-cudart-12-8 \
