@@ -119,6 +119,30 @@ The way this works is that the first request will have a batch size of `DEFAULT_
 | `DEFAULT_MIN_BATCH_SIZE`           | `1`     | `int`        | Batch size for the first request, which will be multiplied by the growth factor every subsequent request. |
 | `DEFAULT_BATCH_SIZE_GROWTH_FACTOR` | `3`     | `float`      | Growth factor for dynamic batch size.                                                                     |
 
+## Endpoint Surface (`MODEL_TASK`)
+
+`MODEL_TASK` selects which OpenAI endpoint families this worker exposes. The default `generate` preserves the legacy upstream surface; setting `MODEL_TASK` to a pooling task enables the corresponding endpoints in addition to (not instead of) `generate`.
+
+| Variable     | Default      | Type/Choices                                                | Description                                                                                                                          |
+| ------------ | ------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `MODEL_TASK` | `generate`   | `generate`, `embed`, `score`, `rerank`, `classify`, `all`   | Which endpoint families to enable. Values are not mutually exclusive when set to `all` (or its synonym `auto`).                      |
+
+| Route                                          | Required `MODEL_TASK`        | Underlying vLLM serving class                                                  |
+| ---------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------ |
+| `/v1/chat/completions`, `/v1/completions`      | `generate` (default)         | `OpenAIServingChat`, `OpenAIServingCompletion`                                 |
+| `/v1/responses`                                | `generate`                   | `OpenAIServingResponses`                                                       |
+| `/v1/messages`                                 | `generate`                   | `AnthropicServingMessages`                                                     |
+| `/v1/embeddings`                               | `embed` / `all` / `auto`     | `vllm.entrypoints.pooling.embed.serving.ServingEmbedding`                      |
+| `/v1/rerank`, `/rerank`, `/v2/rerank`          | `score` / `rerank` / `all`   | `vllm.entrypoints.pooling.scoring.serving.ServingScores` (RerankRequest)       |
+| `/v1/score`                                    | `score` / `rerank` / `all`   | `vllm.entrypoints.pooling.scoring.serving.ServingScores` (ScoreRequest)        |
+| `/v1/classify`                                 | `classify` / `all` / `auto`  | `vllm.entrypoints.pooling.classify.serving.ServingClassification`              |
+
+Construction of pooling serving classes is cheap. If the loaded model can't actually serve the requested task (e.g. a generative model called against `/v1/embeddings`), vLLM raises a clear error at request time — the worker doesn't pre-validate.
+
+| Variable                          | Default | Type/Choices | Description                                                                                                                  |
+| --------------------------------- | ------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `ENABLE_FLASH_LATE_INTERACTION`   | `true`  | `bool`       | Enable Flash late-interaction kernels for cross-encoder rerankers when the loaded model supports it. Falls back transparently. |
+
 ## OpenAI Compatibility Settings
 
 | Variable                            | Default     | Type/Choices     | Description                                                                                                                                                                                                       |

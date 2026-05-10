@@ -728,8 +728,24 @@
         "input": {
           "name": "Base Path",
           "type": "string",
-          "description": "Storage directory for Huggingface cache and model",
-          "default": "/runpod-volume",
+          "description": "Storage directory for Huggingface cache and model. Empty by default — start.sh auto-detects /runpod-volume (serverless) or /workspace (pod). Override with /models if you bake the model into the image.",
+          "advanced": true
+        }
+      },
+      {
+        "key": "MODEL_TASK",
+        "input": {
+          "name": "Model Task",
+          "type": "string",
+          "description": "Which OpenAI endpoint families to expose. 'generate' (default) serves chat/completion/responses/messages. 'embed' adds /v1/embeddings. 'score' (alias 'rerank') adds /v1/rerank, /rerank, /v2/rerank, /v1/score. 'classify' adds /v1/classify. 'all' enables every endpoint; 'auto' is a synonym.",
+          "options": [
+            { "label": "generate (chat/completion/responses)", "value": "generate" },
+            { "label": "embed (/v1/embeddings)", "value": "embed" },
+            { "label": "score / rerank (/v1/rerank, /v1/score)", "value": "score" },
+            { "label": "classify (/v1/classify)", "value": "classify" },
+            { "label": "all (enable every endpoint)", "value": "all" }
+          ],
+          "default": "generate",
           "advanced": true
         }
       },
