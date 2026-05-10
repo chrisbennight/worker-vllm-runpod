@@ -1,0 +1,96 @@
+name: PR build
+
+# Builds both CUDA variants on every push to a PR branch and pushes them to
+# GHCR with pr-<num>-cu128 / pr-<num>-cu130 tags. The build is the control
+# gate test — branch protection on main should require both matrix jobs to
+# pass before a PR can merge (configured in repo Settings → Branches, not
+# in this workflow).
+#
+# Tags are removed automatically when the PR closes (see pr-cleanup.yml).
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  packages: write
+
+# Cancel any earlier build for this PR when a new push lands. This means a
+# rapid-fire push streak only builds the latest commit, saving ~30 min and
+# one runner-hour per cancelled run.
+concurrency:
+  group: pr-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_REF: ghcr.io/${{ github.repository_owner }}/worker-vllm-runpod
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [cu128, cu130]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # vLLM images are multi-GB; standard GHA runners come with ~14 GB free,
+      # which is tight. Free up another ~30 GB before the build.
+      - name: Free disk space
+        run: |
+          rm -rf /usr/share/dotnet
+          rm -rf /opt/ghc
+          rm -rf "/usr/local/share/boost"
+          rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/google
+          docker system prune -af || true
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute build provenance
+        id: provenance
+        run: |
+          echo "git_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "tag=pr-${{ github.event.pull_request.number }}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push ${{ matrix.target }} image
+        uses: docker/bake-action@v5
+        env:
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+          TAG: pr-${{ github.event.pull_request.number }}
+          GIT_SHA: ${{ steps.provenance.outputs.git_sha }}
+          BUILD_DATE: ${{ steps.provenance.outputs.build_date }}
+        with:
+          push: true
+          files: ./docker-bake.hcl
+          targets: devpush-${{ matrix.target }}
+          # Override the hard-coded :dev-cuXXX tag from the bake target so
+          # the PR build doesn't clobber the actual :dev image.
+          set: |
+            devpush-${{ matrix.target }}.tags=${{ env.IMAGE_REF }}:${{ steps.provenance.outputs.tag }}
+
+      - name: Build summary
+        run: |
+          echo "::notice title=PR image::${IMAGE_REF}:${{ steps.provenance.outputs.tag }}"
+          echo "Pull with:"
+          echo "  docker pull ${IMAGE_REF}:${{ steps.provenance.outputs.tag }}"

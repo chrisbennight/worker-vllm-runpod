@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 - **Qwen3-VL turnkey defaults**. `LIMIT_MM_PER_PROMPT=image=4,video=0` is sane for image-only multimodal serving and is documented as the recommended preset; `decord` is available for video work behind a build arg.
 - **Provenance OCI labels** on every published image (`org.opencontainers.image.{title,source,url,licenses,version,revision,created}`).
 - **Tag verification gate** in `release.yml` — refuses to publish unless the requested tag exists, points at HEAD, and the working tree is clean.
+- **PR build gate** (`.github/workflows/pr.yml`) — every push to a PR branch builds both CUDA variants in parallel and pushes them as `:pr-<num>-cu128` / `:pr-<num>-cu130`. Branch protection on `main` should require both `Build cu128` and `Build cu130` checks before merge. `.github/workflows/pr-cleanup.yml` removes the PR-tagged versions from GHCR when the PR closes.
 - **`AGENTS.md`** with branch / PR / release policy.
 - **`.github/pull_request_template.md`** required for every PR.
 - **`CHANGELOG.md`** with this fork-divergence section.

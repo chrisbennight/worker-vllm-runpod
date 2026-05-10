@@ -31,6 +31,8 @@ Side effects of the fork:
 | `.runpod/hub.json` | RunPod Hub UI surface — env-var presets and choices. |
 | `.github/workflows/release.yml` | Tag-driven release pushing `:vX.Y.Z-cu128`, `:cu128`, `:latest`, `:vX.Y.Z-cu130`, `:cu130` to GHCR. Auths with `GITHUB_TOKEN`. |
 | `.github/workflows/dev.yml` | Manual dev workflow that pushes `:dev-cu128` and `:dev-cu130` without touching `:latest`. |
+| `.github/workflows/pr.yml` | Automatic PR build. Runs on every push to a PR branch, builds both CUDA variants in parallel, pushes them to GHCR as `:pr-<num>-cu128` and `:pr-<num>-cu130`. The build is the merge gate — see "Branch and PR policy" below. |
+| `.github/workflows/pr-cleanup.yml` | Deletes the `:pr-<num>-*` tags from GHCR when the PR closes. |
 | `.github/pull_request_template.md` | Required PR template — see "Branch and PR policy". |
 | `CHANGELOG.md` | Has a "fork divergence" section at the top documenting how this image differs from upstream `runpod-workers/worker-vllm`. |
 | `docs/configuration.md` | All env vars, defaults, and choices for runtime configuration. |
@@ -82,6 +84,32 @@ These are load-bearing — break them and the image stops working as designed.
 The template exists because this repo is small but published — context has to live somewhere durable. Commit messages aren't enough; the PR description is the canonical record of *why*.
 
 If a PR is genuinely trivial (typo, comment fix), say so in the Intent section and leave the rest minimal — but use the template structure.
+
+### Merge gate: PR build must pass
+
+`pr.yml` triggers on every push to a PR branch and builds both CUDA variants
+(`cu128` + `cu130`) in parallel. **The PR cannot merge unless both build jobs
+succeed.** Each push cancels the in-flight build for that PR and starts a new
+one — so a rapid-fire push streak only spends runner time on the last commit.
+
+To enforce this server-side, branch protection on `main` should require:
+
+- `Build cu128` (job name from `pr.yml`)
+- `Build cu130` (job name from `pr.yml`)
+
+Configure under **repo Settings → Branches → Branch protection rules → main →
+Require status checks to pass before merging**. The workflow can't set this
+itself; it has to be flipped on once per repo by an admin.
+
+Each successful PR build leaves an artifact at:
+
+```
+ghcr.io/chrisbennight/worker-vllm-runpod:pr-<num>-cu128
+ghcr.io/chrisbennight/worker-vllm-runpod:pr-<num>-cu130
+```
+
+Pull either to test on a RunPod endpoint before merging. `pr-cleanup.yml`
+deletes both tags when the PR closes.
 
 ## Validate before pushing
 

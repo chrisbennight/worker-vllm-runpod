@@ -1,0 +1,44 @@
+name: PR cleanup
+
+# Removes pr-<num>-cu128 / pr-<num>-cu130 GHCR tags when the PR closes
+# (merged or not), so PR build artifacts don't accumulate forever.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete PR-tagged GHCR versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Pull every version of the package, find ones whose tags include
+          # pr-<num>-cu128 or pr-<num>-cu130, and delete by version id.
+          # Uses the user-packages endpoint; switch to /orgs/<org>/... if this
+          # repo ever moves to an org.
+          versions=$(gh api \
+            "/users/${OWNER}/packages/container/worker-vllm-runpod/versions" \
+            --paginate --jq \
+            ".[] | select(.metadata.container.tags // [] | map(test(\"^pr-${PR_NUM}-cu(128|130)$\")) | any) | .id" \
+            || true)
+
+          if [ -z "$versions" ]; then
+            echo "No pr-${PR_NUM}-* tags found; nothing to clean."
+            exit 0
+          fi
+
+          for id in $versions; do
+            echo "Deleting version $id"
+            gh api -X DELETE \
+              "/users/${OWNER}/packages/container/worker-vllm-runpod/versions/${id}" \
+              || echo "Failed to delete version $id (continuing)"
+          done
