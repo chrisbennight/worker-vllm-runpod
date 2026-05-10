@@ -116,17 +116,18 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
 RUN if [ -d /usr/local/cuda/compat ]; then ldconfig /usr/local/cuda/compat; fi
 
 # vLLM-specific runtime tunables.
-ENV PYTHONPATH=/:/vllm-workspace \
-    HF_HUB_ENABLE_HF_TRANSFER=0 \
-    RAY_METRICS_EXPORT_ENABLED=0 \
-    RAY_DISABLE_USAGE_STATS=1 \
-    TOKENIZERS_PARALLELISM=false \
-    RAYON_NUM_THREADS=4
+ENV HF_HUB_ENABLE_HF_TRANSFER=0 \
+    TOKENIZERS_PARALLELISM=false
+
+# vLLM OpenAI-compatible HTTP server defaults — overridable via env on the pod.
+ENV HOST=0.0.0.0 \
+    PORT=8000
+EXPOSE 8000
 
 # Bake-time model fetch args. BASE_PATH is intentionally empty so start.sh
 # auto-detects the volume mount at runtime; users baking a model into the image
 # should override with e.g. BASE_PATH=/models so the bake isn't shadowed by a
-# network volume mounted at /runpod-volume.
+# network volume mounted at /workspace.
 ARG MODEL_NAME=""
 ARG MODEL_REVISION=""
 ARG TOKENIZER_NAME=""
@@ -147,14 +148,14 @@ COPY src /src
 RUN chmod +x /src/start.sh
 
 # Optional bake-time download. Honours either MODEL_NAME (single) or
-# MODELS_MANIFEST (JSON array). Uses an explicit BAKE_HF_HOME so the cache
-# lands in the image filesystem rather than wherever HF_HOME might be set
-# at build time. HF_TOKEN is read from a BuildKit secret and never baked.
+# MODELS_MANIFEST (JSON array). Writes into the standard HF Hub cache rooted
+# at BASE_PATH (default /workspace for pods). HF_TOKEN is read from a
+# BuildKit secret and never baked into a layer.
 RUN --mount=type=secret,id=HF_TOKEN,required=false \
     if [ -f /run/secrets/HF_TOKEN ]; then \
         export HF_TOKEN=$(cat /run/secrets/HF_TOKEN); \
     fi && \
-    BAKE_BASE_PATH="${BASE_PATH:-/runpod-volume}" && \
+    BAKE_BASE_PATH="${BASE_PATH:-/workspace}" && \
     export HF_HOME="${BAKE_BASE_PATH}/.cache/huggingface" && \
     export HF_HUB_CACHE="${HF_HOME}/hub" && \
     export HF_DATASETS_CACHE="${HF_HOME}/datasets" && \
