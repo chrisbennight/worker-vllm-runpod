@@ -4,24 +4,32 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+*"
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (e.g., v2.8.0)"
+        description: "Version to release (e.g., v0.1.0)"
         required: true
         type: string
 
 permissions:
-  contents: write # Required for creating GitHub releases
+  contents: write   # create GitHub release
+  packages: write   # push to ghcr.io
+
+env:
+  IMAGE_REF: ghcr.io/${{ github.repository_owner }}/worker-vllm-runpod
 
 jobs:
   release:
-    runs-on: [blacksmith-8vcpu-ubuntu-2204, linux]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history + tags for the verification step
 
-      - name: Clear space to remove unused folders
+      - name: Free disk space
         run: |
           rm -rf /usr/share/dotnet
           rm -rf /opt/ghc
@@ -34,84 +42,104 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: blacksmith docker layer cache
-        uses: useblacksmith/build-push-action@v1
-        with:
-          setup-only: true
-
-      - name: Set environment variables
+      - name: Resolve release version
+        id: version
         run: |
-          echo "DOCKERHUB_REPO=${{ vars.DOCKERHUB_REPO || 'runpod' }}" >> $GITHUB_ENV
-          echo "DOCKERHUB_IMG=${{ vars.DOCKERHUB_IMG || 'worker-v1-vllm' }}" >> $GITHUB_ENV
-          echo "HUGGINGFACE_ACCESS_TOKEN=${{ secrets.HUGGINGFACE_ACCESS_TOKEN }}" >> $GITHUB_ENV
-
-          # Determine version based on trigger type
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             VERSION="${{ github.event.inputs.version }}"
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             VERSION="${{ github.event.release.tag_name }}"
           else
-            VERSION=${GITHUB_REF#refs/tags/}
+            VERSION="${GITHUB_REF#refs/tags/}"
           fi
-          echo "RELEASE_VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${VERSION}"
 
-      - name: Build and push the images to Docker Hub
-        uses: docker/bake-action@v2
+      - name: Verify tag points at HEAD and tree is clean
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if ! git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "::error::Git tag '$VERSION' does not exist in this repo. Create and push the tag before releasing."
+            exit 1
+          fi
+          TAG_SHA=$(git rev-parse "$VERSION")
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::Tag '$VERSION' points at $TAG_SHA but HEAD is $HEAD_SHA."
+            echo "::error::The release workflow must run on the exact commit the tag points to."
+            echo "::error::If you used workflow_dispatch, re-run it with the tag selected as the ref (or push the tag and let it trigger automatically)."
+            exit 1
+          fi
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::error::Working tree has uncommitted changes."
+            exit 1
+          fi
+          echo "Verified: $VERSION at $TAG_SHA (clean tree)"
+
+      - name: Compute build provenance
+        id: provenance
+        run: |
+          echo "git_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push CUDA 13.0 image (Blackwell)
+        uses: docker/bake-action@v5
+        env:
+          TAG: ${{ steps.version.outputs.version }}
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+          GIT_SHA: ${{ steps.provenance.outputs.git_sha }}
+          BUILD_DATE: ${{ steps.provenance.outputs.build_date }}
         with:
           push: true
-          set: |
-            *.args.DOCKERHUB_REPO=${{ env.DOCKERHUB_REPO }}
-            *.args.DOCKERHUB_IMG=${{ env.DOCKERHUB_IMG }}
-            *.args.RELEASE_VERSION=${{ env.RELEASE_VERSION }}
-            *.args.HUGGINGFACE_ACCESS_TOKEN=${{ env.HUGGINGFACE_ACCESS_TOKEN }}
+          files: ./docker-bake.hcl
+          targets: cu130
 
-      - name: Release Summary
+      - name: Clean up Docker build cache
         run: |
-          echo "Release completed!"
-          echo "Version: ${{ env.RELEASE_VERSION }}"
-          echo "Docker Image: ${{ env.DOCKERHUB_REPO }}/${{ env.DOCKERHUB_IMG }}:${{ env.RELEASE_VERSION }}"
+          docker builder prune -af --filter "until=1h"
+          docker system prune -af --volumes
 
-      - name: Fetch Release Notes
-        run: |
-          RESPONSE=$(curl -sf \
-            -H "Authorization: token ${{ github.token }}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ env.RELEASE_VERSION }}" 2>/dev/null) || true
-          if [[ -n "$RESPONSE" ]]; then
-            NOTES=$(echo "$RESPONSE" | jq -r '.body // empty')
-          fi
-          printf '%s' "${NOTES:-No release notes available.}" > /tmp/release_notes.txt
+      - name: Build and push CUDA 12.8 image
+        uses: docker/bake-action@v5
+        env:
+          TAG: ${{ steps.version.outputs.version }}
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+          GIT_SHA: ${{ steps.provenance.outputs.git_sha }}
+          BUILD_DATE: ${{ steps.provenance.outputs.build_date }}
+        with:
+          push: true
+          files: ./docker-bake.hcl
+          targets: cu128
 
-      - name: Notify Slack
+      - name: Create GitHub Release
+        if: github.event_name != 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
         run: |
-          jq -n \
-            --arg version "${{ env.RELEASE_VERSION }}" \
-            --arg docker "${{ env.DOCKERHUB_REPO }}/${{ env.DOCKERHUB_IMG }}:${{ env.RELEASE_VERSION }}" \
-            --rawfile notes /tmp/release_notes.txt \
-            --arg url "https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_VERSION }}" \
-            '{
-              text: (":rocket: New :runpod-new-whiteonpurple: Runpod worker-vllm release: *" + $version + "*"),
-              blocks: [
-                {
-                  type: "section",
-                  text: {
-                    type: "mrkdwn",
-                    text: (":banana-dance: *New Release — worker-vllm " + $version + "*\n*Docker:* `" + $docker + "`\n<" + $url + "|View release on GitHub>")
-                  }
-                },
-                {
-                  type: "section",
-                  text: {
-                    type: "mrkdwn",
-                    text: ("*Release Notes:*\n" + $notes)
-                  }
-                }
-              ]
-            }' | curl -sf -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
-              -H "Content-Type: application/json" \
-              -d @-
+          V="${{ steps.version.outputs.version }}"
+          SHA="${{ steps.provenance.outputs.git_sha }}"
+          echo "Release ${V} (commit ${SHA})"
+          echo "Images pushed:"
+          echo "  ${IMAGE_REF}:${V}-cu128"
+          echo "  ${IMAGE_REF}:cu128"
+          echo "  ${IMAGE_REF}:latest"
+          echo "  ${IMAGE_REF}:${V}-cu130"
+          echo "  ${IMAGE_REF}:cu130"
+          echo ""
+          echo "Inspect provenance:"
+          echo "  docker buildx imagetools inspect ${IMAGE_REF}:${V}-cu128 --format '{{json .Manifest}}'"
+          echo "  docker pull ${IMAGE_REF}:${V}-cu128 && docker inspect ${IMAGE_REF}:${V}-cu128 --format '{{json .Config.Labels}}'"

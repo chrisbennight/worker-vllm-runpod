@@ -183,10 +183,15 @@ Any vLLM `AsyncEngineArgs` field can be set via an environment variable using th
 
 These variables are used when building custom Docker images with models baked in:
 
-| Variable              | Default          | Type  | Description                                       |
-| --------------------- | ---------------- | ----- | ------------------------------------------------- |
-| `BASE_PATH`           | `/runpod-volume` | `str` | Storage directory for huggingface cache and model |
-| `WORKER_CUDA_VERSION` | `12.1.0`         | `str` | CUDA version for the worker image                 |
+| Variable              | Default          | Type   | Description                                                                                                                                                                                  |
+| --------------------- | ---------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VLLM_VERSION`        | `0.20.2`         | `str`  | vLLM version installed in the builder stage. Set in `docker-bake.hcl`.                                                                                                                       |
+| `TORCH_INDEX_SUFFIX`  | `cu128`          | `str`  | PyTorch wheel index suffix (`cu128` for the default image, `cu130` for the Blackwell variant). Set in `docker-bake.hcl`.                                                                     |
+| `CUDA_VERSION_DASH`   | `12-8`           | `str`  | CUDA APT package suffix (`12-8` or `13-0`). Selects the `cuda-minimal-build-*` package in the builder stage. Set in `docker-bake.hcl`.                                                       |
+| `CUDA_BASE_IMAGE`     | `nvidia/cuda:12.8.1-base-ubuntu24.04` | `str` | NVIDIA CUDA base image. Set in `docker-bake.hcl`.                                                                                                                |
+| `BASE_PATH`           | *(auto-detect)*  | `str`  | Storage root. Empty by default — `start.sh` auto-detects `/runpod-volume` (serverless) or `/workspace` (pod). Override with e.g. `/models` if you bake the model into the image.             |
+| `MODEL_NAME`          | *(empty)*        | `str`  | Single-model bake. If set, `download_model.py` runs at build time and writes `/local_model_args.json`.                                                                                       |
+| `MODELS_MANIFEST`     | *(empty)*        | `JSON` | Multi-model bake. JSON array of `{"model": "...", "revision": "...", "quantization": "..."}` entries. Takes precedence over `MODEL_NAME`. Each model is downloaded into the standard HF cache. |
 
 ## Deprecated Variables
 

@@ -44,10 +44,13 @@ Current vLLM version: [0.19.1](https://github.com/vllm-project/vllm/releases/tag
 
 **🚀 Deploy Guide**: Follow our [step-by-step deployment guide](https://docs.runpod.io/serverless/vllm/get-started) to deploy using the Runpod Console.
 
-**📦 Docker Image**: `runpod/worker-v1-vllm:<version>`
+**📦 Docker Image** (this fork — `chrisbennight/worker-vllm-runpod`):
 
-- **Available Versions**: See [GitHub Releases](https://github.com/runpod-workers/worker-vllm/releases)
-- **CUDA Compatibility**: Requires CUDA >= 12.1
+- `ghcr.io/chrisbennight/worker-vllm-runpod:cu128` — CUDA 12.8 default. Covers Ampere / Hopper / Blackwell SM100 (with FA4 attention).
+- `ghcr.io/chrisbennight/worker-vllm-runpod:cu130` — CUDA 13.0 variant for Blackwell B200 / RTX 5090 (FP4 block-scaled cuBLAS).
+- `ghcr.io/chrisbennight/worker-vllm-runpod:latest` — alias for `:cu128`.
+- Tagged releases: `:vX.Y.Z-cu128` / `:vX.Y.Z-cu130`. See [GitHub Releases](https://github.com/chrisbennight/worker-vllm-runpod/releases).
+- Upstream Docker Hub image (`runpod/worker-v1-vllm:<version>`) is not produced by this fork.
 
 ### Configuration
 
@@ -94,16 +97,17 @@ To build an image with the model baked in, you must specify the following docker
 
 ### Arguments
 
-- **Required**
-  - `MODEL_NAME`
+- **Required (one of)**
+  - `MODEL_NAME` — single-model bake (writes `/local_model_args.json` so the runtime auto-loads the cached path).
+  - `MODELS_MANIFEST` — multi-model bake. JSON array, e.g. `'[{"model":"Qwen/Qwen3-VL-7B-Instruct"},{"model":"BAAI/bge-reranker-v2-m3"}]'`. Each entry can carry `revision`, `tokenizer`, `tokenizer_revision`, `quantization`. Runtime `MODEL_NAME` selects which baked model to load.
 - **Optional**
   - `MODEL_REVISION`: Model revision to load (default: `main`).
-  - `BASE_PATH`: Storage directory where huggingface cache and model will be located. (default: `/runpod-volume`, which will utilize network storage if you attach it or create a local directory within the image if you don't. If your intention is to bake the model into the image, you should set this to something like `/models` to make sure there are no issues if you were to accidentally attach network storage.)
+  - `BASE_PATH`: Storage directory where the HuggingFace cache and model will be located. Empty by default — `start.sh` auto-detects `/runpod-volume` (serverless) or `/workspace` (pod) and sets `BASE_PATH` accordingly. Set to e.g. `/models` if you intend to bake the model into the image and don't want it shadowed by a network volume mounted at `/runpod-volume`.
   - `QUANTIZATION`
-  - `WORKER_CUDA_VERSION`: `12.1.0` (`12.1.0` is recommended for optimal performance).
   - `TOKENIZER_NAME`: Tokenizer repository if you would like to use a different tokenizer than the one that comes with the model. (default: `None`, which uses the model's tokenizer)
   - `TOKENIZER_REVISION`: Tokenizer revision to load (default: `main`).
-  - `VLLM_NIGHTLY`: Set to `true` to replace the pinned vLLM release with the latest nightly build and the latest `transformers` from source. Useful for testing unreleased vLLM features. (default: `false`)
+  - `VLLM_VERSION`: vLLM version (default: `0.20.2`, set in `docker-bake.hcl`).
+  - `TORCH_INDEX_SUFFIX`: PyTorch wheel index suffix (`cu128` default, `cu130` for the Blackwell variant; set in `docker-bake.hcl`).
 
 For the remaining settings, you may apply them as environment variables when running the container. Supported environment variables are listed in the [Environment Variables](#environment-variables) section.
 
@@ -113,19 +117,20 @@ For the remaining settings, you may apply them as environment variables when run
 docker build -t username/image:tag --build-arg MODEL_NAME="openchat/openchat_3.5" --build-arg BASE_PATH="/models" .
 ```
 
-### Example: Building with vLLM Nightly
-
-To use the latest unreleased vLLM build (installs from the nightly wheel index and `transformers` from source):
+### Example: Multi-model bake via manifest
 
 ```bash
-docker build -t username/image:tag --build-arg VLLM_NIGHTLY=true .
+docker buildx bake -f docker-bake.hcl cu128 \
+    --set "*.args.MODELS_MANIFEST=$(cat <<'JSON'
+[
+  {"model": "Qwen/Qwen3-VL-7B-Instruct"},
+  {"model": "BAAI/bge-reranker-v2-m3"}
+]
+JSON
+)"
 ```
 
-You can combine it with other arguments:
-
-```bash
-docker build -t username/image:tag --build-arg VLLM_NIGHTLY=true --build-arg MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" --build-arg BASE_PATH="/models" .
-```
+At runtime, set `MODEL_NAME` to whichever baked model the endpoint should serve.
 
 ### (Optional) Including Huggingface Token
 
