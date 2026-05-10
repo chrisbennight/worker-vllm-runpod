@@ -17,6 +17,12 @@ ARG INSTALL_VIDEO_EXTRAS=false
 
 # Install Python 3.12 + build essentials + CUDA build packages (only in
 # builder so we don't pay the size in the runtime layer).
+#
+# Note: the nvidia/cuda:*-base-* image already configures the NVIDIA APT
+# repo with /usr/share/keyrings/cuda-archive-keyring.gpg as Signed-By.
+# Re-running `dpkg -i cuda-keyring_*.deb` writes a second source entry with
+# a conflicting Signed-By value and apt refuses to read the source list
+# ("Conflicting values set for option Signed-By"). Don't add it.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3.12 \
@@ -25,15 +31,9 @@ RUN apt-get update && \
         build-essential \
         ca-certificates \
         curl \
-        wget \
-        gnupg \
-    && wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
-    && dpkg -i cuda-keyring_1.1-1_all.deb \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends cuda-minimal-build-${CUDA_VERSION_DASH} \
+        cuda-minimal-build-${CUDA_VERSION_DASH} \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
-    && rm cuda-keyring_1.1-1_all.deb \
     && rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED
 
 # Bootstrap pip + pip-tools for hashed lockfile generation.
