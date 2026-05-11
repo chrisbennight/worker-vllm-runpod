@@ -30,7 +30,13 @@ export TORCH_HOME="${TORCH_HOME:-${BASE_PATH}/.cache/torch}"
 # tier). Kept under .cache/vllm/ so they never collide with comfy state.
 export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-${BASE_PATH}/.cache/vllm}"
 
-mkdir -p "$HF_HUB_CACHE" "$HF_DATASETS_CACHE" "$TORCH_HOME" "$VLLM_CACHE_ROOT"
+# flashinfer JIT-compiles attention kernels for SMs not covered by its
+# pre-compiled cubin set (e.g. SM120 on RTX PRO 6000). Default cache is
+# /root/.cache/flashinfer which is gone on container restart; redirect to
+# the volume so a per-(model, dtype, head_dim) compile happens at most once.
+export FLASHINFER_JIT_CACHE_DIR="${FLASHINFER_JIT_CACHE_DIR:-${BASE_PATH}/.cache/flashinfer}"
+
+mkdir -p "$HF_HUB_CACHE" "$HF_DATASETS_CACHE" "$TORCH_HOME" "$VLLM_CACHE_ROOT" "$FLASHINFER_JIT_CACHE_DIR"
 
 echo "[start] BASE_PATH=$BASE_PATH"
 echo "[start] HF_HOME=$HF_HOME"

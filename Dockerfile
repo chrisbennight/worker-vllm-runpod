@@ -84,7 +84,7 @@ ENV PYTHONUNBUFFERED=1
 
 ARG CUDA_VERSION_DASH=12-8
 
-# Runtime deps + a working C/C++ toolchain.
+# Runtime deps + a working C/C++/CUDA toolchain.
 #
 # Why build-essential at runtime: PyTorch's torch.compile/inductor backend
 # triggers Triton's JIT, which compiles CUDA driver utilities on first use
@@ -93,15 +93,29 @@ ARG CUDA_VERSION_DASH=12-8
 #   torch._inductor.exc.InductorError: Failed to find C compiler.
 # The builder stage has build-essential, but multi-stage copy only grabs
 # /usr/local/lib/python3.12 + /usr/local/bin, so gcc (in /usr/bin/) is
-# stripped. Re-install it here. Adds ~300 MB to a ~12 GB image.
+# stripped. Re-install it here. Adds ~300 MB.
 #
-# Why cuda-cudart-12-8: vLLM 0.20.2 ships a precompiled nixl_ep extension
-# (NIXL all-to-all helper for MoE) that links against libcudart.so.12
-# regardless of which CUDA wheel suffix vLLM was installed with. On the
-# cu130 base image (which only has libcudart.so.13), startup crashes:
+# Why cuda-minimal-build-${CUDA_VERSION_DASH}: vLLM 0.20.2's flashinfer
+# (0.6.8.post1) ships pre-compiled cubins for some SMs but JIT-compiles
+# missing ones at first request — notably SM120 (RTX PRO 6000 / RTX 5090).
+# The JIT shells out to /usr/local/cuda/bin/nvcc. Without it, startup
+# crashes during cudagraph profiling with:
+#   RuntimeError: Ninja build failed.
+#     /bin/sh: 1: /usr/local/cuda/bin/nvcc: not found
+# We install the toolchain that matches the *image's* CUDA version so
+# /usr/local/cuda → /usr/local/cuda-${CUDA_VERSION_DOT} → has nvcc.
+# Adds ~600 MB.
+#
+# Why cuda-cudart-12-8: vLLM 0.20.2 also ships a precompiled nixl_ep
+# extension (NIXL all-to-all helper for MoE) that links against
+# libcudart.so.12 *regardless* of which CUDA wheel suffix vLLM was
+# installed with — it's a vLLM packaging assumption, not a base-image
+# choice. On the cu130 base image (which only has libcudart.so.13),
+# startup crashes:
 #   ImportError: libcudart.so.12: cannot open shared object file
 # On the cu128 base image this package is already present from the base,
-# so re-declaring it is a no-op there.
+# so re-declaring it is a no-op there. Kept hardcoded to 12-8 because
+# that's the SONAME nixl_ep needs.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3.12 \
@@ -110,6 +124,7 @@ RUN apt-get update && \
         build-essential \
         ca-certificates \
         curl \
+        cuda-minimal-build-${CUDA_VERSION_DASH} \
         cuda-cudart-12-8 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
