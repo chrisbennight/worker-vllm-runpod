@@ -1,79 +1,49 @@
-# Contributing to worker-vllm
+# Contributing
 
-## 🚀 Release Process
+Thanks for your interest. This repo builds a slim vLLM serverless worker for use on RunPod, published to GitHub Container Registry as `ghcr.io/chrisbennight/worker-vllm-runpod`.
 
-### Development Workflow
+## Releases
 
-1. **Feature Development**
+Releases are driven by tags. The `Release` workflow builds and pushes both CUDA variants to GHCR using the repo's `GITHUB_TOKEN` — no Docker Hub secrets required.
 
-   ```bash
-   git checkout -b feature/your-feature-name
-   # Make your changes
-   git push origin feature/your-feature-name
-   ```
+To cut a release:
 
-   - Creates pull request → triggers dev build: `runpod/worker-v1-vllm:dev-refs-pull-214-merge`
+1. Pick a semver tag, e.g. `v0.2.0`.
+2. Trigger the workflow in any of three ways:
+   - Push the tag: `git tag v0.2.0 && git push origin v0.2.0`
+   - Publish a GitHub Release with that tag.
+   - Run the **Release** workflow manually with `version = v0.2.0`.
+3. The workflow builds and pushes:
+   - `ghcr.io/chrisbennight/worker-vllm-runpod:v0.2.0-cu128`
+   - `ghcr.io/chrisbennight/worker-vllm-runpod:cu128`
+   - `ghcr.io/chrisbennight/worker-vllm-runpod:latest`
+   - `ghcr.io/chrisbennight/worker-vllm-runpod:v0.2.0-cu130`
+   - `ghcr.io/chrisbennight/worker-vllm-runpod:cu130`
 
-2. **Main Branch**
-   ```bash
-   git checkout main
-   git merge feature/your-feature-name
-   git push origin main
-   ```
-   - No automatic builds on main (staging area)
+Tags are defined in `docker-bake.hcl`; do not override via `--set` in the workflow.
 
-### Creating Releases
+## Dev builds
 
-**Method 1: GitHub UI (Recommended)**
+Use the **Dev Build** workflow (manually triggered). It pushes `ghcr.io/chrisbennight/worker-vllm-runpod:dev-cu128` and `:dev-cu130` without touching `:latest`.
 
-1. Go to [Releases](https://github.com/runpod-workers/worker-vllm/releases)
-2. Click **"Create a new release"**
-3. **Tag version**: `v2.8.0` (with "v" prefix, semantic versioning)
-4. **Target**: `main` branch
-5. **Title**: `Release 2.8.0`
-6. **Description**: Brief changelog
-7. Click **"Publish release"**
-
-**Method 2: Git CLI**
+For local builds:
 
 ```bash
-git checkout main
-git tag v2.8.0
-git push origin v2.8.0
+docker buildx bake -f docker-bake.hcl dev
 ```
 
-### What Happens Automatically
+## Bumping pinned versions
 
-✅ **GitHub Release** created (if using Method 1)  
-✅ **Docker Image** built and pushed: `runpod/worker-v1-vllm:v2.8.0`  
-✅ **Documentation** updated with new version references
+- vLLM, PyTorch, CUDA suffix, image reference — all live in `docker-bake.hcl` as `variable` blocks.
+- The Python lockfile is regenerated at build time from `builder/requirements.in` (and the pinned vLLM version), so dependency bumps are usually just an `.in` or HCL edit.
 
-## 📋 Version Format
+## PRs
 
-- **Format**: `vMAJOR.MINOR.PATCH` (e.g., `v2.8.0`)
-- **With "v" prefix**: Use `v2.8.0` for git tags
-- **Semantic Versioning**: Follow [SemVer](https://semver.org/)
+- Keep changes focused and explain the rationale in the description.
+- Use `.github/pull_request_template.md` (required).
+- Update `docs/configuration.md` and `.runpod/hub.json` when changing env vars or runtime behavior.
+- Update `CHANGELOG.md` for any user-visible change.
 
-## 🐛 Development
+## License
 
-### Running Tests
-
-```bash
-# Update test configuration in .runpod/tests.json
-# Tests run automatically via RunPod platform
-```
-
-### Model Updates
-
-- Update `MODEL_NAME` in `.runpod/tests.json` and `worker-config.json`
-- Ensure model has vLLM support and chat template (for OpenAI compatibility)
-
-### Environment Variables
-
-See [README.md](../README.md) for full list of supported environment variables.
-
-## 🔧 CI/CD Workflows
-
-- **Dev builds**: All pull requests → `dev-refs-pull-<PR#>-merge` images
-- **Release builds**: Git tags → versioned images + GitHub releases
-- **Manual triggers**: Available in GitHub Actions for emergency releases
+MIT (inherited from upstream).

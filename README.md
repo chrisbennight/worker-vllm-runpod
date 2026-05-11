@@ -1,499 +1,126 @@
 <div align="center">
 
-# OpenAI-Compatible vLLM Serverless Endpoint Worker
+# worker-vllm-runpod (pod mode)
 
-Deploy OpenAI-Compatible Blazing-Fast LLM Endpoints powered by the [vLLM](https://github.com/vllm-project/vllm) Inference Engine on Runpod Serverless with just a few clicks.
+OpenAI-compatible vLLM image for **RunPod pods** — Blackwell-ready (CUDA 12.8 + 13.0), opinionated, slim.
 
 </div>
 
-![vLLM worker banner](https://image.runpod.ai/preview/vllm/vllm-banner.png)
+> This is a [`runpod-workers/worker-vllm`](https://github.com/runpod-workers/worker-vllm) fork that pivots from **serverless** to **pod** deployment. It runs `vllm serve` directly and speaks the standard OpenAI-compatible HTTP API on port 8000 — no Runpod job-queue plumbing. If you want serverless, use [the upstream image](https://github.com/runpod-workers/worker-vllm).
 
-Current vLLM version: [0.19.1](https://github.com/vllm-project/vllm/releases/tag/v0.19.1)
+Sibling project: [`chrisbennight/comfyui-base-runpod`](https://github.com/chrisbennight/comfyui-base-runpod). The two images share a cache layout so a single RunPod Network Volume can host model weights for both stacks.
 
+## Images
 
-> Check out our Load Balancer implementation here: [vLLM Load Balancer](https://github.com/runpod-workers/vllm-loadbalancer-ep)
+| Tag                                                            | Audience                                                                                                        |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `ghcr.io/chrisbennight/worker-vllm-runpod:cu128`               | Default. Covers Ampere / Hopper / Blackwell SM100 with FA4 attention.                                            |
+| `ghcr.io/chrisbennight/worker-vllm-runpod:cu130`               | Blackwell B200 / RTX 5090 / RTX PRO 6000 — carries CUDA 13.0 wheels (FP4 block-scaled cuBLAS).                  |
+| `ghcr.io/chrisbennight/worker-vllm-runpod:latest`              | Alias for `:cu128`.                                                                                              |
+| `ghcr.io/chrisbennight/worker-vllm-runpod:vX.Y.Z-cu{128,130}`  | Pinned releases. See [GitHub Releases](https://github.com/chrisbennight/worker-vllm-runpod/releases).            |
 
-## Table of Contents
+## Quick start (RunPod pod)
 
-- [Setting up the Serverless Worker](#setting-up-the-serverless-worker)
-  - [Option 1: Deploy Any Model Using Pre-Built Docker Image [Recommended]](#option-1-deploy-any-model-using-pre-built-docker-image-recommended)
-    - [Configuration](#configuration)
-  - [Option 2: Build Docker Image with Model Inside](#option-2-build-docker-image-with-model-inside)
-    - [Prerequisites](#prerequisites)
-    - [Arguments](#arguments)
-    - [Example: Building an image with OpenChat-3.5](#example-building-an-image-with-openchat-35)
-      - [(Optional) Including Huggingface Token](#optional-including-huggingface-token)
-  - [Compatible Model Architectures](#compatible-model-architectures)
-- [Usage: OpenAI Compatibility](#usage-openai-compatibility)
-  - [Modifying your OpenAI Codebase to use your deployed vLLM Worker](#modifying-your-openai-codebase-to-use-your-deployed-vllm-worker)
-  - [OpenAI Request Input Parameters](#openai-request-input-parameters)
-  - [Chat Completions [RECOMMENDED]](#chat-completions-recommended)
-  - [Examples: Using your Runpod endpoint with OpenAI](#examples-using-your-runpod-endpoint-with-openai)
-    - [Chat Completions](#chat-completions)
-    - [Getting a list of names for available models](#getting-a-list-of-names-for-available-models)
-    - [OpenAI Responses API](#openai-responses-api)
-    - [Anthropic Messages API](#anthropic-messages-api)
-- [Usage: Standard (Non-OpenAI)](#usage-standard-non-openai)
-  - [Request Input Parameters](#request-input-parameters)
-  - [Sampling Parameters](#sampling-parameters)
-    - [Text Input Formats](#text-input-formats)
+Spin up a pod with:
 
-# Setting up the Serverless Worker
+- **Image**: `ghcr.io/chrisbennight/worker-vllm-runpod:cu130` (or `:cu128` on non-Blackwell GPUs)
+- **GPU**: whatever fits your model — e.g. `RTX PRO 6000 Blackwell Server Edition` (96 GB) for a 27B BF16 model at 256k context.
+- **Container disk**: 50-100 GB.
+- **Network volume**: mounted at `/workspace`. Highly recommended so model weights survive pod restarts.
+- **Exposed ports**: TCP `8000` (vLLM). Optional `22` if you bake SSH in (the image doesn't ship SSH out of the box).
+- **Env vars**: at minimum `MODEL_NAME`. See [docs/configuration.md](docs/configuration.md) for the full surface.
 
-## Option 1: Deploy Any Model Using Pre-Built Docker Image [Recommended]
-
-**🚀 Deploy Guide**: Follow our [step-by-step deployment guide](https://docs.runpod.io/serverless/vllm/get-started) to deploy using the Runpod Console.
-
-**📦 Docker Image**: `runpod/worker-v1-vllm:<version>`
-
-- **Available Versions**: See [GitHub Releases](https://github.com/runpod-workers/worker-vllm/releases)
-- **CUDA Compatibility**: Requires CUDA >= 12.1
-
-### Configuration
-
-Configure worker-vllm using environment variables:
-
-| Environment Variable                | Description                                       | Default             | Options                                                            |
-| ----------------------------------- | ------------------------------------------------- | ------------------- | ------------------------------------------------------------------ |
-| `MODEL_NAME`                        | Path of the model weights                         | "facebook/opt-125m" | Local folder or Hugging Face repo ID                               |
-| `HF_TOKEN`                          | HuggingFace access token for gated/private models |                     | Your HuggingFace access token                                      |
-| `MAX_MODEL_LEN`                     | Model's maximum context length                    |                     | Integer (e.g., 4096)                                               |
-| `QUANTIZATION`                      | Quantization method                               |                     | "awq", "gptq", "squeezellm", "bitsandbytes"                        |
-| `TENSOR_PARALLEL_SIZE`              | Number of GPUs                                    | 1                   | Integer                                                            |
-| `GPU_MEMORY_UTILIZATION`            | Fraction of GPU memory to use                     | 0.95                | Float between 0.0 and 1.0                                          |
-| `MAX_NUM_SEQS`                      | Maximum number of sequences per iteration         | 256                 | Integer                                                            |
-| `CUSTOM_CHAT_TEMPLATE`              | Custom chat template override                     |                     | Jinja2 template string                                             |
-| `ENABLE_AUTO_TOOL_CHOICE`           | Enable automatic tool selection                   | false               | boolean (true or false)                                            |
-| `TOOL_CALL_PARSER`                  | Parser for tool calls                             |                     | "mistral", "hermes", "llama3_json", "granite", "deepseek_v3", etc. |
-| `OPENAI_SERVED_MODEL_NAME_OVERRIDE` | Override served model name in API                 |                     | String                                                             |
-| `MAX_CONCURRENCY`                   | Maximum concurrent requests                       | 30                  | Integer                                                            |
-
-**Pass any vLLM engine arg** not listed above by setting an environment variable with the **UPPERCASED** field name (same names vLLM uses). The worker auto-discovers all `AsyncEngineArgs` fields from env. For example:
-
-| Environment Variable      | vLLM Engine Arg          | Example Value |
-| ------------------------- | ------------------------ | ------------- |
-| `MAX_MODEL_LEN`           | `max_model_len`          | `4096`        |
-| `ENFORCE_EAGER`           | `enforce_eager`          | `true`        |
-| `ENABLE_CHUNKED_PREFILL`  | `enable_chunked_prefill` | `true`        |
-
-Any env var whose name matches a valid `AsyncEngineArgs` field (uppercased) is applied automatically. Backward-compat aliases: `MODEL_NAME`, `TOKENIZER_NAME`, `MAX_CONTEXT_LEN_TO_CAPTURE`. This lets you configure any vLLM option without waiting for explicit worker support.
-
-For the complete list of all available environment variables, examples, and detailed descriptions: **[Configuration](docs/configuration.md)**
-
-### Specify Transformers Version
-To change the version of the [Transformers library](https://github.com/huggingface/transformers) use the `TRANSFORMERS_VERSION` environment variable to specify the version you want to use. Note this might break the handler, so use for development purposes. 
-
-
-## Option 2: Build Docker Image with Model Inside
-
-To build an image with the model baked in, you must specify the following docker arguments when building the image.
-
-### Prerequisites
-
-- Docker
-
-### Arguments
-
-- **Required**
-  - `MODEL_NAME`
-- **Optional**
-  - `MODEL_REVISION`: Model revision to load (default: `main`).
-  - `BASE_PATH`: Storage directory where huggingface cache and model will be located. (default: `/runpod-volume`, which will utilize network storage if you attach it or create a local directory within the image if you don't. If your intention is to bake the model into the image, you should set this to something like `/models` to make sure there are no issues if you were to accidentally attach network storage.)
-  - `QUANTIZATION`
-  - `WORKER_CUDA_VERSION`: `12.1.0` (`12.1.0` is recommended for optimal performance).
-  - `TOKENIZER_NAME`: Tokenizer repository if you would like to use a different tokenizer than the one that comes with the model. (default: `None`, which uses the model's tokenizer)
-  - `TOKENIZER_REVISION`: Tokenizer revision to load (default: `main`).
-  - `VLLM_NIGHTLY`: Set to `true` to replace the pinned vLLM release with the latest nightly build and the latest `transformers` from source. Useful for testing unreleased vLLM features. (default: `false`)
-
-For the remaining settings, you may apply them as environment variables when running the container. Supported environment variables are listed in the [Environment Variables](#environment-variables) section.
-
-### Example: Building an image with OpenChat-3.5
+Once the pod is `RUNNING`, RunPod's HTTP proxy maps `https://<pod-id>-8000.proxy.runpod.net` → port 8000 inside the container. Hit it like any other OpenAI-compatible endpoint:
 
 ```bash
-docker build -t username/image:tag --build-arg MODEL_NAME="openchat/openchat_3.5" --build-arg BASE_PATH="/models" .
+curl https://<pod-id>-8000.proxy.runpod.net/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "Qwen/Qwen3.5-27B-uncensored-heretic",
+      "messages": [{"role": "user", "content": "hello"}]
+    }'
 ```
 
-### Example: Building with vLLM Nightly
+## Example: Qwen3.5-27B at 256k context on Blackwell
 
-To use the latest unreleased vLLM build (installs from the nightly wheel index and `transformers` from source):
+Env vars on the pod (covers the [`llmfan46/Qwen3.5-27B-uncensored-heretic`](https://huggingface.co/llmfan46/Qwen3.5-27B-uncensored-heretic) preset from the model card):
 
 ```bash
-docker build -t username/image:tag --build-arg VLLM_NIGHTLY=true .
+MODEL_NAME=llmfan46/Qwen3.5-27B-uncensored-heretic
+MAX_MODEL_LEN=262144
+TRUST_REMOTE_CODE=true
+DTYPE=bfloat16
+KV_CACHE_DTYPE=fp8                   # halves KV cache so 256k fits at 96 GB
+GPU_MEMORY_UTILIZATION=0.92
+MAX_NUM_SEQS=8                       # cap concurrent sequences for long context
+REASONING_PARSER=qwen3
+TOOL_CALL_PARSER=hermes
+ENABLE_AUTO_TOOL_CHOICE=true
+HF_HUB_ENABLE_HF_TRANSFER=1          # faster first-time HF download
 ```
 
-You can combine it with other arguments:
+That's it — `start.sh` translates each variable into the equivalent `vllm serve` CLI flag and execs the server. The actual invocation is logged on boot.
+
+## Building a custom image with a model baked in
+
+Two modes — single-model or a JSON manifest. See [docs/configuration.md](docs/configuration.md#bake-time-model-fetch-model_name--models_manifest) for the full reference. Short version:
 
 ```bash
-docker build -t username/image:tag --build-arg VLLM_NIGHTLY=true --build-arg MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" --build-arg BASE_PATH="/models" .
+docker buildx bake -f docker-bake.hcl cu130 \
+    --set "*.args.MODEL_NAME=Qwen/Qwen3.5-27B-uncensored-heretic" \
+    --set "*.args.BASE_PATH=/models"
 ```
 
-### (Optional) Including Huggingface Token
-
-If the model you would like to deploy is private or gated, you will need to include it during build time as a Docker secret, which will protect it from being exposed in the image and on DockerHub.
-
-1. Enable Docker BuildKit (required for secrets).
+For gated/private models, pass `HF_TOKEN` as a BuildKit secret (never baked into a layer):
 
 ```bash
-export DOCKER_BUILDKIT=1
+docker buildx bake -f docker-bake.hcl cu130 \
+    --set "*.args.MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct" \
+    --set "*.args.BASE_PATH=/models" \
+    --set "*.secrets.HF_TOKEN=$HF_TOKEN"
 ```
 
-2. Export your Hugging Face token as an environment variable
+Multi-model bake (JSON array via build arg):
 
 ```bash
-export HF_TOKEN="your_token_here"
+docker buildx bake -f docker-bake.hcl cu130 \
+    --set "*.args.BASE_PATH=/models" \
+    --set "*.args.MODELS_MANIFEST=$(cat <<'JSON'
+[
+  {"model": "Qwen/Qwen3.5-27B-uncensored-heretic"},
+  {"model": "BAAI/bge-large-en-v1.5"}
+]
+JSON
+)"
 ```
 
-2. Add the token as a secret when building
+At runtime, set `MODEL_NAME` to whichever baked model the pod should serve.
 
-```bash
-docker build -t username/image:tag --secret id=HF_TOKEN --build-arg MODEL_NAME="openchat/openchat_3.5" .
+## Network volume layout
+
+The image expects (and auto-detects) the volume to be mounted at `/workspace` (RunPod pod convention) or `/runpod-volume` (legacy/serverless). Underneath either:
+
+```
+<volume>/
+├── ComfyUI/                  # only if you share the volume with comfyui-base-runpod
+├── .cache/
+│   ├── huggingface/
+│   │   ├── hub/              # shared HF model cache (single source of truth across stacks)
+│   │   └── datasets/
+│   └── torch/                # shared torch cache
+└── .cache/vllm/              # vLLM-private (torch.compile, CUDA graphs, LMCache disk tier)
 ```
 
-# Compatible Model Architectures
+vLLM-private caches stay under `.cache/vllm/` so they never collide with comfy state when the same volume hosts both.
 
-You can deploy **any model on Hugging Face** that is supported by vLLM. For the complete and up-to-date list of supported model architectures, see the [vLLM Supported Models documentation](https://docs.vllm.ai/en/latest/models/supported_models.html#list-of-text-only-language-models).
+## Configuration
 
-# Usage: OpenAI Compatibility
+Full env-var reference (server, model, parallelism, multimodal, LoRA, etc.) lives in [`docs/configuration.md`](docs/configuration.md). Anything not surfaced by name can still be passed via `VLLM_EXTRA_ARGS` — that env var is split on whitespace and appended to `vllm serve`.
 
-The vLLM Worker is fully compatible with OpenAI's API, and you can use it with any OpenAI Codebase by changing only 3 lines in total. The supported routes are <ins>Chat Completions</ins>, <ins>Models</ins>, <ins>Responses</ins>, and <ins>Messages</ins> - with both streaming and non-streaming.
+## Contributing
 
-## Modifying your OpenAI Codebase to use your deployed vLLM Worker
+See [`AGENTS.md`](AGENTS.md) for the branch / PR / release policy. Every change lands via a PR using [`.github/pull_request_template.md`](.github/pull_request_template.md). The `pr.yml` workflow builds both CUDA variants automatically on every push to a PR branch; both must pass for the PR to merge.
 
-**Python** (similar to Node.js, etc.):
+## License
 
-1. When initializing the OpenAI Client in your code, change the `api_key` to your Runpod API Key and the `base_url` to your Runpod Serverless Endpoint URL in the following format: `https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1`, filling in your deployed endpoint ID. For example, if your Endpoint ID is `abc1234`, the URL would be `https://api.runpod.ai/v2/abc1234/openai/v1`.
-
-   - Before:
-
-   ```python
-   from openai import OpenAI
-
-   client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-   ```
-
-   - After:
-
-   ```python
-   from openai import OpenAI
-
-   client = OpenAI(
-       api_key=os.environ.get("RUNPOD_API_KEY"),
-       base_url="https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1",
-   )
-   ```
-
-2. Change the `model` parameter to your deployed model's name whenever using Completions or Chat Completions.
-   - Before:
-   ```python
-   response = client.chat.completions.create(
-       model="gpt-3.5-turbo",
-       messages=[{"role": "user", "content": "Why is Runpod the best platform?"}],
-       temperature=0,
-       max_tokens=100,
-   )
-   ```
-   - After:
-   ```python
-   response = client.chat.completions.create(
-       model="<YOUR DEPLOYED MODEL REPO/NAME>",
-       messages=[{"role": "user", "content": "Why is Runpod the best platform?"}],
-       temperature=0,
-       max_tokens=100,
-   )
-   ```
-
-**Using http requests**:
-
-1. Change the `Authorization` header to your Runpod API Key and the `url` to your Runpod Serverless Endpoint URL in the following format: `https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1`
-   - Before:
-   ```bash
-   curl https://api.openai.com/v1/chat/completions \
-   -H "Content-Type: application/json" \
-   -H "Authorization: Bearer $OPENAI_API_KEY" \
-   -d '{
-   "model": "gpt-4",
-   "messages": [
-     {
-       "role": "user",
-       "content": "Why is Runpod the best platform?"
-     }
-   ],
-   "temperature": 0,
-   "max_tokens": 100
-   }'
-   ```
-   - After:
-   ```bash
-   curl https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1/chat/completions \
-   -H "Content-Type: application/json" \
-   -H "Authorization: Bearer <YOUR OPENAI API KEY>" \
-   -d '{
-   "model": "<YOUR DEPLOYED MODEL REPO/NAME>",
-   "messages": [
-     {
-       "role": "user",
-       "content": "Why is Runpod the best platform?"
-     }
-   ],
-   "temperature": 0,
-   "max_tokens": 100
-   }'
-   ```
-
-## OpenAI Request Input Parameters:
-
-When using the chat completion feature of the vLLM Serverless Endpoint Worker, you can customize your requests with the following parameters:
-
-### Chat Completions [RECOMMENDED]
-
-<details>
-  <summary>Supported Chat Completions Inputs and Descriptions</summary>
-
-| Parameter           | Type                             | Default Value | Description                                                                                                                                                                                                                                                  |
-| ------------------- | -------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `messages`          | Union[str, List[Dict[str, str]]] |               | List of messages, where each message is a dictionary with a `role` and `content`. The model's chat template will be applied to the messages automatically, so the model must have one or it should be specified as `CUSTOM_CHAT_TEMPLATE` env var.           |
-| `model`             | str                              |               | The model repo that you've deployed on your Runpod Serverless Endpoint. If you are unsure what the name is or are baking the model in, use the guide to get the list of available models in the **Examples: Using your Runpod endpoint with OpenAI** section |
-| `temperature`       | Optional[float]                  | 0.7           | Float that controls the randomness of the sampling. Lower values make the model more deterministic, while higher values make the model more random. Zero means greedy sampling.                                                                              |
-| `top_p`             | Optional[float]                  | 1.0           | Float that controls the cumulative probability of the top tokens to consider. Must be in (0, 1]. Set to 1 to consider all tokens.                                                                                                                            |
-| `n`                 | Optional[int]                    | 1             | Number of output sequences to return for the given prompt.                                                                                                                                                                                                   |
-| `max_tokens`        | Optional[int]                    | None          | Maximum number of tokens to generate per output sequence.                                                                                                                                                                                                    |
-| `seed`              | Optional[int]                    | None          | Random seed to use for the generation.                                                                                                                                                                                                                       |
-| `stop`              | Optional[Union[str, List[str]]]  | list          | List of strings that stop the generation when they are generated. The returned output will not contain the stop strings.                                                                                                                                     |
-| `stream`            | Optional[bool]                   | False         | Whether to stream or not                                                                                                                                                                                                                                     |
-| `presence_penalty`  | Optional[float]                  | 0.0           | Float that penalizes new tokens based on whether they appear in the generated text so far. Values > 0 encourage the model to use new tokens, while values < 0 encourage the model to repeat tokens.                                                          |
-| `frequency_penalty` | Optional[float]                  | 0.0           | Float that penalizes new tokens based on their frequency in the generated text so far. Values > 0 encourage the model to use new tokens, while values < 0 encourage the model to repeat tokens.                                                              |
-| `logit_bias`        | Optional[Dict[str, float]]       | None          | Unsupported by vLLM                                                                                                                                                                                                                                          |
-| `user`              | Optional[str]                    | None          | Unsupported by vLLM                                                                                                                                                                                                                                          |
-
-Additional parameters supported by vLLM:
-| `best_of` | Optional[int] | None | Number of output sequences that are generated from the prompt. From these `best_of` sequences, the top `n` sequences are returned. `best_of` must be greater than or equal to `n`. This is treated as the beam width when `use_beam_search` is True. By default, `best_of` is set to `n`. |
-| `top_k` | Optional[int] | -1 | Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens. |
-| `ignore_eos` | Optional[bool] | False | Whether to ignore the EOS token and continue generating tokens after the EOS token is generated. |
-| `use_beam_search` | Optional[bool] | False | Whether to use beam search instead of sampling. |
-| `stop_token_ids` | Optional[List[int]] | list | List of tokens that stop the generation when they are generated. The returned output will contain the stop tokens unless the stop tokens are special tokens. |
-| `skip_special_tokens` | Optional[bool] | True | Whether to skip special tokens in the output. |
-| `spaces_between_special_tokens`| Optional[bool] | True | Whether to add spaces between special tokens in the output. Defaults to True. |
-| `add_generation_prompt` | Optional[bool] | True | Read more [here](https://huggingface.co/docs/transformers/main/en/chat_templating#what-are-generation-prompts) |
-| `echo` | Optional[bool] | False | Echo back the prompt in addition to the completion |
-| `repetition_penalty` | Optional[float] | 1.0 | Float that penalizes new tokens based on whether they appear in the prompt and the generated text so far. Values > 1 encourage the model to use new tokens, while values < 1 encourage the model to repeat tokens. |
-| `min_p` | Optional[float] | 0.0 | Float that represents the minimum probability for a token to |
-| `length_penalty` | Optional[float] | 1.0 | Float that penalizes sequences based on their length. Used in beam search.. |
-| `include_stop_str_in_output` | Optional[bool] | False | Whether to include the stop strings in output text. Defaults to False.|
-
-</details>
-
-### Examples: Using your Runpod endpoint with OpenAI
-
-First, initialize the OpenAI Client with your Runpod API Key and Endpoint URL:
-
-```python
-from openai import OpenAI
-import os
-
-# Initialize the OpenAI Client with your Runpod API Key and Endpoint URL
-client = OpenAI(
-    api_key=os.environ.get("RUNPOD_API_KEY"),
-    base_url="https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1",
-)
-```
-
-### Chat Completions:
-
-This is the format used for GPT-4 and focused on instruction-following and chat. Examples of Open Source chat/instruct models include `meta-llama/Llama-2-7b-chat-hf`, `mistralai/Mixtral-8x7B-Instruct-v0.1`, `openchat/openchat-3.5-0106`, `NousResearch/Nous-Hermes-2-Mistral-7B-DPO` and more. However, if your model is a completion-style model with no chat/instruct fine-tune and/or does not have a chat template, you can still use this if you provide a chat template with the environment variable `CUSTOM_CHAT_TEMPLATE`.
-
-- **Streaming**:
-  ```python
-  # Create a chat completion stream
-  response_stream = client.chat.completions.create(
-      model="<YOUR DEPLOYED MODEL REPO/NAME>",
-      messages=[{"role": "user", "content": "Why is Runpod the best platform?"}],
-      temperature=0,
-      max_tokens=100,
-      stream=True,
-  )
-  # Stream the response
-  for response in response_stream:
-      print(chunk.choices[0].delta.content or "", end="", flush=True)
-  ```
-- **Non-Streaming**:
-  ```python
-  # Create a chat completion
-  response = client.chat.completions.create(
-      model="<YOUR DEPLOYED MODEL REPO/NAME>",
-      messages=[{"role": "user", "content": "Why is Runpod the best platform?"}],
-      temperature=0,
-      max_tokens=100,
-  )
-  # Print the response
-  print(response.choices[0].message.content)
-  ```
-
-### Getting a list of names for available models:
-
-In the case of baking the model into the image, sometimes the repo may not be accepted as the `model` in the request. In this case, you can list the available models as shown below and use that name.
-
-```python
-models_response = client.models.list()
-list_of_models = [model.id for model in models_response]
-print(list_of_models)
-```
-
-### OpenAI Responses API
-
-**Path:** `/openai/v1/responses` (full URL: `https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1/responses`)
-
-Supports the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) request shape. Like other `/openai/` routes, this is served directly—use the `/openai/` prefix rather than the RunPod native job queue for these calls.
-
-```json
-{
-  "model": "meta-llama/Llama-3.1-8B-Instruct",
-  "input": "Tell me a joke."
-}
-```
-
-**Using HTTP requests:**
-
-```bash
-curl https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1/responses \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <YOUR RUNPOD API KEY>" \
-  -d '{
-    "model": "<YOUR DEPLOYED MODEL REPO/NAME>",
-    "input": "Tell me a joke."
-  }'
-```
-
-### Anthropic Messages API
-
-**Path:** `/openai/v1/messages` (full URL: `https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1/messages`)
-
-Supports the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) format. Served directly, bypassing the RunPod queue.
-
-```json
-{
-  "model": "meta-llama/Llama-3.1-8B-Instruct",
-  "max_tokens": 256,
-  "messages": [
-    {"role": "user", "content": "Hello!"}
-  ]
-}
-```
-
-**Using HTTP requests:**
-
-```bash
-curl https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1/messages \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <YOUR RUNPOD API KEY>" \
-  -d '{
-    "model": "<YOUR DEPLOYED MODEL REPO/NAME>",
-    "max_tokens": 256,
-    "messages": [
-      {"role": "user", "content": "Hello!"}
-    ]
-  }'
-```
-
-# Usage: Standard (Non-OpenAI)
-
-## Request Input Parameters
-
-<details>
-  <summary>Click to expand table</summary>
-    
-  You may either use a `prompt` or a list of `messages` as input. If you use `messages`, the model's chat template will be applied to the messages automatically, so the model must have one. If you use `prompt`, you may optionally apply the model's chat template to the prompt by setting `apply_chat_template` to `true`.
-  | Argument              | Type                 | Default            | Description                                                                                            |
-  |-----------------------|----------------------|--------------------|--------------------------------------------------------------------------------------------------------|
-  | `prompt`              | str                  |                    | Prompt string to generate text based on.                                                               |
-  | `messages`            | list[dict[str, str]] |                    | List of messages, which will automatically have the model's chat template applied. Overrides `prompt`. |
-  | `apply_chat_template` | bool                 | False              | Whether to apply the model's chat template to the `prompt`.                                            |
-  | `sampling_params`     | dict                 | {}                 | Sampling parameters to control the generation, like temperature, top_p, etc. You can find all available parameters in the `Sampling Parameters` section below. |
-  | `stream`              | bool                 | False              | Whether to enable streaming of output. If True, responses are streamed as they are generated.          |
-  | `max_batch_size`          | int                  | env var `DEFAULT_BATCH_SIZE` | The maximum number of tokens to stream every HTTP POST call.                                                   |
-  | `min_batch_size`          | int                  | env var `DEFAULT_MIN_BATCH_SIZE` | The minimum number of tokens to stream every HTTP POST call.                                           |
-  | `batch_size_growth_factor` | int                  | env var `DEFAULT_BATCH_SIZE_GROWTH_FACTOR` | The growth factor by which `min_batch_size` will be multiplied for each call until `max_batch_size` is reached.           |
-</details>
-
-### Sampling Parameters
-
-Below are all available sampling parameters that you can specify in the `sampling_params` dictionary. If you do not specify any of these parameters, the default values will be used.
-
-<details>
-  <summary>Click to expand table</summary>
-
-| Argument                        | Type                        | Default | Description                                                                                                                                                                                   |
-| ------------------------------- | --------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `n`                             | int                         | 1       | Number of output sequences generated from the prompt. The top `n` sequences are returned.                                                                                                     |
-| `best_of`                       | Optional[int]               | `n`     | Number of output sequences generated from the prompt. The top `n` sequences are returned from these `best_of` sequences. Must be ≥ `n`. Treated as beam width in beam search. Default is `n`. |
-| `presence_penalty`              | float                       | 0.0     | Penalizes new tokens based on their presence in the generated text so far. Values > 0 encourage new tokens, values < 0 encourage repetition.                                                  |
-| `frequency_penalty`             | float                       | 0.0     | Penalizes new tokens based on their frequency in the generated text so far. Values > 0 encourage new tokens, values < 0 encourage repetition.                                                 |
-| `repetition_penalty`            | float                       | 1.0     | Penalizes new tokens based on their appearance in the prompt and generated text. Values > 1 encourage new tokens, values < 1 encourage repetition.                                            |
-| `temperature`                   | float                       | 1.0     | Controls the randomness of sampling. Lower values make it more deterministic, higher values make it more random. Zero means greedy sampling.                                                  |
-| `top_p`                         | float                       | 1.0     | Controls the cumulative probability of top tokens to consider. Must be in (0, 1]. Set to 1 to consider all tokens.                                                                            |
-| `top_k`                         | int                         | -1      | Controls the number of top tokens to consider. Set to -1 to consider all tokens.                                                                                                              |
-| `min_p`                         | float                       | 0.0     | Represents the minimum probability for a token to be considered, relative to the most likely token. Must be in [0, 1]. Set to 0 to disable.                                                   |
-| `use_beam_search`               | bool                        | False   | Whether to use beam search instead of sampling.                                                                                                                                               |
-| `length_penalty`                | float                       | 1.0     | Penalizes sequences based on their length. Used in beam search.                                                                                                                               |
-| `early_stopping`                | Union[bool, str]            | False   | Controls stopping condition in beam search. Can be `True`, `False`, or `"never"`.                                                                                                             |
-| `stop`                          | Union[None, str, List[str]] | None    | List of strings that stop generation when produced. The output will not contain these strings.                                                                                                |
-| `stop_token_ids`                | Optional[List[int]]         | None    | List of token IDs that stop generation when produced. Output contains these tokens unless they are special tokens.                                                                            |
-| `ignore_eos`                    | bool                        | False   | Whether to ignore the End-Of-Sequence token and continue generating tokens after its generation.                                                                                              |
-| `max_tokens`                    | int                         | 16      | Maximum number of tokens to generate per output sequence.                                                                                                                                     |
-| `skip_special_tokens`           | bool                        | True    | Whether to skip special tokens in the output.                                                                                                                                                 |
-| `spaces_between_special_tokens` | bool                        | True    | Whether to add spaces between special tokens in the output.                                                                                                                                   |
-
-### Text Input Formats
-
-You may either use a `prompt` or a list of `messages` as input.
-
-1.  `prompt`
-    The prompt string can be any string, and the model's chat template will not be applied to it unless `apply_chat_template` is set to `true`, in which case it will be treated as a user message.
-
-        Example:
-        ```json
-        {
-          "input": {
-            "prompt": "why sky is blue?",
-            "sampling_params": {
-              "temperature": 0.7,
-              "max_tokens": 100
-            }
-          }
-        }
-        ```
-
-2.  `messages`
-    Your list can contain any number of messages, and each message usually can have any role from the following list: - `user` - `assistant` - `system`
-
-    However, some models may have different roles, so you should check the model's chat template to see which roles are required.
-
-    The model's chat template will be applied to the messages automatically, so the model must have one.
-
-    Example:
-
-    ```json
-    {
-      "input": {
-        "messages": [
-          {
-            "role": "system",
-            "content": "You are a helpful AI assistant that provides clear and concise responses."
-          },
-          {
-            "role": "user",
-            "content": "Can you explain the difference between supervised and unsupervised learning?"
-          },
-          {
-            "role": "assistant",
-            "content": "Sure! Supervised learning uses labeled data, meaning each input has a corresponding correct output. The model learns by mapping inputs to known outputs. In contrast, unsupervised learning works with unlabeled data, where the model identifies patterns, structures, or clusters without predefined answers."
-          }
-        ],
-        "sampling_params": {
-          "temperature": 0.7,
-          "max_tokens": 100
-        }
-      }
-    }
-    ```
-
-</details>
+MIT (inherited from upstream).

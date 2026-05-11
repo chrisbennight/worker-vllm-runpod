@@ -1,0 +1,16 @@
+# Top-level Python deps for worker-vllm-runpod (pod mode).
+#
+# vLLM and the PyTorch wheel for the target CUDA are added to this file at
+# build time by the Dockerfile (so they pick up the right CUDA variant). Keep
+# this list small — vLLM's transitive set carries most of the dependency tree.
+
+# Optional fast HF download (used by download_model.py at bake time)
+hf-transfer
+
+# Pulled by vLLM transitively but worth pinning a floor so CVE bumps don't
+# silently slide back. Anything older breaks chat templating on Qwen3-VL.
+huggingface-hub>=0.27.0
+
+# LMCache disk/CPU offload — opt-in via env vars but baked so it's available.
+# Pinned to match vLLM 0.20.x's expected interface.
+lmcache==0.4.2

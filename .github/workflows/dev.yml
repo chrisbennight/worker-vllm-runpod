@@ -1,21 +1,40 @@
-name: Development
+name: Dev Build
 
 on:
-  pull_request:
-    branches:
-      - "**"
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push to GHCR"
+        type: boolean
+        required: true
+        default: true
+      target:
+        description: "Which CUDA variant(s) to build"
+        type: choice
+        required: true
+        default: both
+        options:
+          - both
+          - cu128
+          - cu130
 
 permissions:
   contents: read
+  packages: write
+
+env:
+  IMAGE_REF: ghcr.io/${{ github.repository_owner }}/worker-vllm-runpod
 
 jobs:
   dev:
-    runs-on: [blacksmith-8vcpu-ubuntu-2204, linux]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Clear space to remove unused folders
+      - name: Free disk space
         run: |
           rm -rf /usr/share/dotnet
           rm -rf /opt/ghc
@@ -28,33 +47,48 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
+      - name: Login to GHCR
+        if: inputs.push == true
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: blacksmith docker layer cache
-        uses: useblacksmith/build-push-action@v1
-        with:
-          setup-only: true
-
-      - name: Set environment variables
+      - name: Compute build provenance
+        id: provenance
         run: |
-          echo "DOCKERHUB_REPO=${{ vars.DOCKERHUB_REPO || 'runpod' }}" >> $GITHUB_ENV
-          echo "DOCKERHUB_IMG=${{ vars.DOCKERHUB_IMG || 'worker-v1-vllm' }}" >> $GITHUB_ENV
-          echo "HUGGINGFACE_ACCESS_TOKEN=${{ secrets.HUGGINGFACE_ACCESS_TOKEN }}" >> $GITHUB_ENV
-          # Convert branch name to safe docker tag (replace / with -)
-          BRANCH_NAME="${GITHUB_REF##refs/heads/}"
-          SAFE_BRANCH_NAME=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/--*/-/g')
-          echo "RELEASE_VERSION=dev-${SAFE_BRANCH_NAME}" >> $GITHUB_ENV
+          echo "git_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push the images to Docker Hub
-        uses: docker/bake-action@v2
+      - name: Build and push CUDA 13.0 dev image
+        if: inputs.target == 'both' || inputs.target == 'cu130'
+        uses: docker/bake-action@v5
+        env:
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+          TAG: dev
+          GIT_SHA: ${{ steps.provenance.outputs.git_sha }}
+          BUILD_DATE: ${{ steps.provenance.outputs.build_date }}
         with:
-          push: true
-          set: |
-            *.args.DOCKERHUB_REPO=${{ env.DOCKERHUB_REPO }}
-            *.args.DOCKERHUB_IMG=${{ env.DOCKERHUB_IMG }}
-            *.args.RELEASE_VERSION=${{ env.RELEASE_VERSION }}
-            *.args.HUGGINGFACE_ACCESS_TOKEN=${{ env.HUGGINGFACE_ACCESS_TOKEN }}
+          push: ${{ inputs.push }}
+          files: ./docker-bake.hcl
+          targets: devpush-cu130
+
+      - name: Clean up Docker build cache
+        if: inputs.target == 'both'
+        run: |
+          docker builder prune -af --filter "until=1h"
+          docker system prune -af --volumes
+
+      - name: Build and push CUDA 12.8 dev image
+        if: inputs.target == 'both' || inputs.target == 'cu128'
+        uses: docker/bake-action@v5
+        env:
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+          TAG: dev
+          GIT_SHA: ${{ steps.provenance.outputs.git_sha }}
+          BUILD_DATE: ${{ steps.provenance.outputs.build_date }}
+        with:
+          push: ${{ inputs.push }}
+          files: ./docker-bake.hcl
+          targets: devpush-cu128
